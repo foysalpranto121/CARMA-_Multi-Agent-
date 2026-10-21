@@ -4,15 +4,28 @@ Database: PostgreSQL (CARMADB)
 Auth: JWT via djangorestframework-simplejwt
 """
 import os
+import warnings
 from pathlib import Path
 from datetime import timedelta
 from decouple import config, Csv
+from django.core.management.utils import get_random_secret_key
 
 # ── Paths ──────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ── Security ───────────────────────────────────────────────────
-SECRET_KEY = config('SECRET_KEY')
+# No secret is committed to the repository.  When SECRET_KEY is absent a random
+# key is generated for this process, which is fine for development but invalidates
+# existing tokens on every restart — set SECRET_KEY in .env for a stable install.
+SECRET_KEY = config('SECRET_KEY', default='')
+if not SECRET_KEY:
+    SECRET_KEY = get_random_secret_key()
+    warnings.warn(
+        'SECRET_KEY is not set — a random key was generated for this process. '
+        'Set SECRET_KEY in .env so sessions and tokens survive a restart.',
+        RuntimeWarning,
+    )
+
 DEBUG       = config('DEBUG', default=False, cast=bool)
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost', cast=Csv())
 
@@ -90,7 +103,7 @@ DATABASES = {
         'ENGINE':   'django.db.backends.postgresql',
         'NAME':     config('DB_NAME',     default='CARMADB'),
         'USER':     config('DB_USER',     default='postgres'),
-        'PASSWORD': config('DB_PASSWORD', default='pranto121'),
+        'PASSWORD': config('DB_PASSWORD', default=''),
         'HOST':     config('DB_HOST',     default='localhost'),
         'PORT':     config('DB_PORT',     default='5432'),
         'OPTIONS': {
@@ -172,7 +185,7 @@ SIMPLE_JWT = {
 
     # Algorithm
     'ALGORITHM':                  'HS256',
-    'SIGNING_KEY':                config('JWT_SIGNING_KEY', default=SECRET_KEY),
+    'SIGNING_KEY':                config('JWT_SIGNING_KEY', default='') or SECRET_KEY,
     'VERIFYING_KEY':              None,
     'AUDIENCE':                   None,
     'ISSUER':                     'carma-platform',
@@ -190,11 +203,6 @@ SIMPLE_JWT = {
     'TOKEN_REFRESH_SERIALIZER':   'rest_framework_simplejwt.serializers.TokenRefreshSerializer',
     'TOKEN_VERIFY_SERIALIZER':    'rest_framework_simplejwt.serializers.TokenVerifySerializer',
     'TOKEN_BLACKLIST_SERIALIZER': 'rest_framework_simplejwt.serializers.TokenBlacklistSerializer',
-
-    # Sliding tokens (disabled — use rotate instead)
-    'SLIDING_TOKEN_REFRESH_EXP_CLAIM': 'refresh_exp',
-    'SLIDING_TOKEN_LIFETIME':          timedelta(minutes=5),
-    'SLIDING_TOKEN_REFRESH_LIFETIME':  timedelta(days=1),
 }
 
 # ── CORS ───────────────────────────────────────────────────────
@@ -204,7 +212,6 @@ CORS_ALLOWED_ORIGINS = config(
     cast=Csv()
 )
 CORS_ALLOW_CREDENTIALS    = True
-CORS_ALLOW_ALL_ORIGINS    = DEBUG   # only in dev!
 CORS_EXPOSE_HEADERS       = ['Content-Disposition']
 CORS_ALLOW_HEADERS = [
     'accept', 'accept-encoding', 'authorization',
@@ -220,7 +227,6 @@ if not DEBUG:
     SECURE_SSL_REDIRECT           = True
     SESSION_COOKIE_SECURE         = True
     CSRF_COOKIE_SECURE            = True
-    SECURE_BROWSER_XSS_FILTER     = True
     SECURE_CONTENT_TYPE_NOSNIFF   = True
     X_FRAME_OPTIONS               = 'DENY'
     SECURE_REFERRER_POLICY        = 'strict-origin-when-cross-origin'
@@ -361,3 +367,7 @@ QDRANT_URL     = config('QDRANT_URL',     default='http://localhost:6333')
 QDRANT_API_KEY = config('QDRANT_API_KEY', default='')
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OLLAMA_BASE_URL= config('OLLAMA_BASE_URL',default='http://localhost:11434')
+OPENAI_BASE_URL= config('OPENAI_BASE_URL',default='https://api.openai.com/v1')
+
+# HMAC secret used to sign the SCV execution tokens.
+SCV_SIGNING_SECRET = config('SCV_SIGNING_SECRET', default=SECRET_KEY)

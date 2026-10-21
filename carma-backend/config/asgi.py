@@ -16,7 +16,6 @@ from apps.reviews.consumers  import ReviewConsumer
 
 websocket_urlpatterns = [
     re_path(r'^ws/experiments/(?P<run_id>[0-9a-f-]+)/logs/$', ExperimentLogConsumer.as_asgi()),
-    re_path(r'^ws/cases/(?P<case_id>[0-9a-f-]+)/live/$',      ExperimentLogConsumer.as_asgi()),
     re_path(r'^ws/reviews/$',                                  ReviewConsumer.as_asgi()),
 ]
 

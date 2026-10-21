@@ -2,19 +2,19 @@ import { useState } from 'react';
 import {
   LayoutDashboard, FlaskConical, Database, BarChart3,
   ShieldAlert, ScrollText, ChevronRight, ChevronLeft,
-  Cpu, LogOut, User
+  Cpu, LogOut
 } from 'lucide-react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { useAuthStore } from '../store/authStore';
+import { useAuthStore, hasRole } from '../store/authStore';
 
 const NAV_ITEMS = [
-  { to: '/dashboard',   icon: LayoutDashboard, label: 'Dashboard',   tip: 'Dashboard' },
-  { to: '/processes',   icon: Cpu,              label: 'Processes',   tip: 'Process Frames' },
-  { to: '/benchmark',   icon: Database,         label: 'Benchmark',   tip: 'WF-Adapt Benchmark' },
-  { to: '/experiments', icon: FlaskConical,     label: 'Experiments', tip: 'Experiment Runs' },
-  { to: '/metrics',     icon: BarChart3,        label: 'Metrics',     tip: 'Results & Statistics' },
-  { to: '/review',      icon: ShieldAlert,      label: 'Review',      tip: 'Escalation Queue' },
-  { to: '/audit',       icon: ScrollText,       label: 'Audit',       tip: 'Audit Log' },
+  { to: '/dashboard',   icon: LayoutDashboard, label: 'Dashboard',   tip: 'Dashboard',    roles: null },
+  { to: '/processes',   icon: Cpu,              label: 'Processes',   tip: 'Process Frames', roles: ['researcher'] },
+  { to: '/benchmark',   icon: Database,         label: 'Benchmark',   tip: 'WF-Adapt Benchmark', roles: null },
+  { to: '/experiments', icon: FlaskConical,     label: 'Experiments', tip: 'Experiment Runs', roles: null },
+  { to: '/metrics',     icon: BarChart3,        label: 'Metrics',     tip: 'Results & Statistics', roles: ['researcher'] },
+  { to: '/review',      icon: ShieldAlert,      label: 'Review',      tip: 'Escalation Queue', roles: ['reviewer'] },
+  { to: '/audit',       icon: ScrollText,       label: 'Audit',       tip: 'Audit Log', roles: ['researcher'] },
 ];
 
 const ROLE_COLOR = {
@@ -33,6 +33,10 @@ export default function Sidebar() {
     logout();
     navigate('/', { replace: true });
   };
+
+  const visibleItems = NAV_ITEMS.filter(
+    (item) => hasRole(user?.role, item.roles),
+  );
 
   return (
     <nav
@@ -58,7 +62,7 @@ export default function Sidebar() {
 
       {/* ── Nav links ── */}
       <div className="sidebar-nav">
-        {NAV_ITEMS.map(({ to, icon: Icon, label, tip }) => (
+        {visibleItems.map(({ to, icon: Icon, label, tip }) => (
           <NavLink
             key={to}
             to={to}
@@ -108,7 +112,7 @@ export default function Sidebar() {
                 fontSize: 11, fontWeight: 600, color: 'var(--text-primary)',
                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
               }}>
-                {user.firstName ?? user.username}
+                {user.fullName ?? user.username}
               </div>
               <div style={{
                 fontSize: 9, fontFamily: 'var(--font-mono)', letterSpacing: '0.1em',

@@ -40,8 +40,3 @@ class HumanReviewViewSet(viewsets.ModelViewSet):
         # Mark escalation as resolved
         review.escalation.status = 'resolved'
         review.escalation.save(update_fields=['status'])
-
-
-class ReviewConsumer:
-    """Stub — see apps/reviews/consumers.py for full WebSocket implementation."""
-    pass

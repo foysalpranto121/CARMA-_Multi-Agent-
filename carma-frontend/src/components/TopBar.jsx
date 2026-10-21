@@ -1,11 +1,14 @@
-import { Bell, Wifi, WifiOff, User } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { Bell, Wifi, WifiOff } from 'lucide-react';
 import { useLocation, Link } from 'react-router-dom';
-import { useAuthStore } from '../store/authStore';
+import { useAuthStore, hasRole } from '../store/authStore';
+import { reviewApi, systemApi, unwrap } from '../api/client';
 
 const PAGE_TITLES = {
   '/dashboard':          { title: 'DASHBOARD',   sub: 'System Overview' },
   '/processes':          { title: 'PROCESSES',   sub: 'Process Frames & Constraints' },
-  '/benchmark':          { title: 'WF-ADAPT',    sub: 'Benchmark · 840 Cases · 7 Scenarios' },
+  '/benchmark':          { title: 'WF-ADAPT',    sub: 'Benchmark · Cases & Scenarios' },
   '/experiments':        { title: 'EXPERIMENTS', sub: '8 Configurations · 3 Models · 3 Seeds' },
   '/experiments/new':    { title: 'NEW RUN',     sub: 'Configure Experiment' },
   '/metrics':            { title: 'METRICS',     sub: 'Statistical Analysis & Results' },
@@ -22,10 +25,10 @@ const ROLE_COLOR = {
 
 /* Live clock component */
 function LiveClock() {
-  const [time, setTime] = useState(new Date().toISOString().slice(0,19).replace('T',' ') + ' UTC');
+  const [time, setTime] = useState(new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC');
   useEffect(() => {
     const t = setInterval(() =>
-      setTime(new Date().toISOString().slice(0,19).replace('T',' ') + ' UTC'), 1000);
+      setTime(new Date().toISOString().slice(0, 19).replace('T', ' ') + ' UTC'), 1000);
     return () => clearInterval(t);
   }, []);
   return (
@@ -38,12 +41,30 @@ function LiveClock() {
   );
 }
 
-import { useState, useEffect } from 'react';
-
-export default function TopBar({ systemOnline = true }) {
+export default function TopBar() {
   const location = useLocation();
   const { user } = useAuthStore();
   const page     = PAGE_TITLES[location.pathname] ?? { title: 'CARMA', sub: 'Research Platform' };
+
+  const canReview = hasRole(user?.role, ['reviewer']);
+
+  const status = useQuery({
+    queryKey: ['system-status', 'topbar'],
+    queryFn: async () => (await systemApi.status()).data,
+    refetchInterval: 30_000,
+    enabled: Boolean(user),
+  });
+
+  const escalations = useQuery({
+    queryKey: ['escalations', 'pending-count'],
+    queryFn: async () => unwrap((await reviewApi.escalations({
+      status: 'pending', page_size: 50 })).data),
+    refetchInterval: 30_000,
+    enabled: canReview,
+  });
+
+  const online = status.data?.status === 'ok';
+  const pendingCount = (escalations.data ?? []).length;
 
   return (
     <header className="topbar">
@@ -60,36 +81,48 @@ export default function TopBar({ systemOnline = true }) {
         {/* Live clock */}
         <LiveClock />
 
-        {/* System status */}
-        <div className="system-status">
-          {systemOnline
-            ? <>
-                <div className="status-dot" />
-                <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}>ONLINE</span>
-                <Wifi size={11} color="var(--holo-green)" />
-              </>
-            : <>
-                <div className="status-dot error" />
-                <span style={{ fontSize: 10 }}>OFFLINE</span>
-                <WifiOff size={11} color="var(--holo-rose)" />
-              </>
-          }
+        {/* System status — reflects the real API / database state */}
+        <div className="system-status" title={status.data?.message ?? undefined}>
+          {status.isLoading
+            ? <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}>CHECKING…</span>
+            : online
+              ? <>
+                  <div className="status-dot" />
+                  <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}>ONLINE</span>
+                  <Wifi size={11} color="var(--holo-green)" />
+                </>
+              : <>
+                  <div className="status-dot error" />
+                  <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)' }}>
+                    {status.data?.status === 'degraded' ? 'DEGRADED' : 'OFFLINE'}
+                  </span>
+                  <WifiOff size={11} color="var(--holo-rose)" />
+                </>}
         </div>
 
-        {/* Notifications bell */}
-        <button
-          className="btn btn-ghost btn-icon"
-          aria-label="Notifications"
-          style={{ position: 'relative' }}
-        >
-          <Bell size={14} />
-          <span style={{
-            position: 'absolute', top: 6, right: 6,
-            width: 5, height: 5, borderRadius: '50%',
-            background: 'var(--holo-rose)',
-            boxShadow: '0 0 6px var(--holo-rose)',
-          }} />
-        </button>
+        {/* Escalation notifications — real pending count for reviewers */}
+        {canReview && (
+          <Link
+            to="/review"
+            className="btn btn-ghost btn-icon"
+            aria-label={`${pendingCount} pending escalations`}
+            style={{ position: 'relative', textDecoration: 'none' }}
+          >
+            <Bell size={14} />
+            {pendingCount > 0 && (
+              <span style={{
+                position: 'absolute', top: 4, right: 4,
+                minWidth: 14, height: 14, padding: '0 3px', borderRadius: '7px',
+                background: 'var(--holo-rose)', color: '#fff',
+                fontSize: 8, fontFamily: 'var(--font-mono)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                boxShadow: '0 0 6px var(--holo-rose)',
+              }}>
+                {pendingCount > 99 ? '99+' : pendingCount}
+              </span>
+            )}
+          </Link>
+        )}
 
         {/* User chip */}
         {user && (
@@ -116,7 +149,7 @@ export default function TopBar({ systemOnline = true }) {
                 fontSize: 11, fontWeight: 600, color: 'var(--text-primary)',
                 lineHeight: 1.1,
               }}>
-                {user.firstName ?? user.username}
+                {user.fullName ?? user.username}
               </div>
               <div style={{
                 fontSize: 8, fontFamily: 'var(--font-mono)',

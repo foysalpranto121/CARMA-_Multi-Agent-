@@ -88,7 +88,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         verbose_name_plural = 'Users'
         ordering = ['-date_joined']
         indexes = [
-            models.Index(fields=['email']),
+            # NOTE: no index on ``email`` — the column is UNIQUE, which already
+            # creates a unique index.  A second index would only cost writes.
             models.Index(fields=['role']),
             models.Index(fields=['is_active']),
         ]

@@ -1,10 +1,12 @@
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuthStore } from '../store/authStore';
+import { useAuthStore, hasRole } from '../store/authStore';
 
 /**
  * Wraps any route that requires authentication.
  * Unauthenticated users are redirected to /login,
  * preserving the intended destination in location.state.
+ *
+ * `requiredRole` accepts a single role or a list.  Admins always pass.
  */
 export function ProtectedRoute({ children, requiredRole = null }) {
   const { isLoggedIn, user } = useAuthStore();
@@ -20,8 +22,8 @@ export function ProtectedRoute({ children, requiredRole = null }) {
     );
   }
 
-  if (requiredRole && user?.role !== requiredRole) {
-    return <Navigate to="/" replace />;
+  if (requiredRole && !hasRole(user?.role, requiredRole)) {
+    return <Navigate to="/dashboard" replace />;
   }
 
   return children;

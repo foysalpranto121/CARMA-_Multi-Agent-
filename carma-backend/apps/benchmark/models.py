@@ -100,9 +100,21 @@ class BenchmarkCase(models.Model):
     perturbation     = models.JSONField(help_text='Perturbation event e')
     perturbation_text= models.TextField(blank=True, help_text='Natural language description')
 
+    # The executed part of the case: the prefix that has already happened
+    # when the perturbation arrives.  The agent has to produce the
+    # continuation of this prefix.
+    prefix_trace     = models.JSONField(
+        default=list,
+        help_text='Executed prefix of the case (list of {activity, timestamp, ...})',
+    )
+
     # Gold standard annotation
     gold_adaptation  = models.JSONField(help_text='Annotated correct adaptation A*')
     gold_activity_seq= models.JSONField(default=list, help_text='Gold activity sequence')
+    gold_continuation= models.JSONField(
+        default=list,
+        help_text='The continuation the log actually recorded for this case',
+    )
     gold_viol_cost   = models.FloatField(default=0.0, help_text='Gold violation cost')
     gold_exec_cost   = models.FloatField(default=0.0, help_text='Gold execution cost')
 
@@ -114,6 +126,15 @@ class BenchmarkCase(models.Model):
     kappa          = models.FloatField(null=True, blank=True,
                                        help_text="Cohen's κ for this case")
     annotation_notes = models.TextField(blank=True)
+
+    # The automated check of the reference behaviour.  It verifies that the
+    # gold really belongs to the case: that the prefix is a prefix of the
+    # observed trace, that the reference path is made of declared
+    # activities and that the reference behaviour can be scored.
+    validation_report = models.JSONField(
+        default=dict, blank=True,
+        help_text='Outcome of the automated validation of the gold',
+    )
 
     is_validated   = models.BooleanField(default=False)
     created_at     = models.DateTimeField(auto_now_add=True)
@@ -128,3 +149,14 @@ class BenchmarkCase(models.Model):
 
     def __str__(self):
         return f'BC:{self.id} [{self.scenario.code}] {self.case}'
+
+    @property
+    def executed_prefix(self) -> list:
+        """
+        The prefix that has already been executed when the perturbation
+        arrives.  Falls back to the full trace of the underlying case for
+        benchmark rows created before the prefix was split out.
+        """
+        if self.prefix_trace:
+            return self.prefix_trace
+        return self.case.prefix_trace or []

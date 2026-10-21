@@ -3,7 +3,10 @@ CARMA — Celery Tasks: Experiment Orchestration
 Runs the full B0-B7 experiment pipeline on WF-Adapt benchmark cases.
 """
 import logging
-from celery import shared_task, chord, group
+import time
+
+from celery import group, shared_task
+from django.db.models import Avg, Case, Count, FloatField, Q, Sum, Value, When
 from django.utils import timezone
 
 log = logging.getLogger('carma')
@@ -12,23 +15,23 @@ log = logging.getLogger('carma')
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def run_experiment(self, run_id: str):
     """
-    Master task: fan-out all benchmark cases for the given run.
-    Uses a Celery chord: group(run_case.s(...)) | aggregate_results.s(run_id)
+    Master task: fan out all benchmark cases of a run.
+
+    Uses a Celery chord: ``group(run_case.s(...)) | aggregate_results.s(run_id)``.
     """
-    from apps.experiments.models import ExperimentRun
     from apps.benchmark.models import BenchmarkCase
+    from apps.experiments.models import ExperimentRun
 
     try:
         run = ExperimentRun.objects.select_related(
             'configuration', 'constraint_set', 'process').get(id=run_id)
     except ExperimentRun.DoesNotExist:
         log.error('ExperimentRun %s not found.', run_id)
-        return
+        return {'status': 'failed', 'error': 'run not found'}
 
     run.status    = 'running'
     run.started_at = timezone.now()
 
-    # Get all validated benchmark cases for this process
     cases = BenchmarkCase.objects.filter(
         process=run.process, is_validated=True
     ).select_related('case', 'scenario', 'constraint_set')
@@ -36,185 +39,162 @@ def run_experiment(self, run_id: str):
     run.total_cases = cases.count()
     run.save(update_fields=['status', 'started_at', 'total_cases'])
 
-    # Broadcast via WebSocket
     _push_progress(run_id, run.total_cases, 0, 'running')
 
-    # Build chord: parallel case runs → aggregate
-    subtasks = group(
-        run_case.s(run_id, str(bc.id))
-        for bc in cases
-    )
+    if not run.total_cases:
+        # Nothing to do — finalise immediately so the run does not stay
+        # "running" forever.
+        aggregate_results.apply(args=[[], run_id])
+        return {'status': 'completed', 'cases': 0}
+
+    subtasks = group(run_case.s(run_id, str(bc.id)) for bc in cases)
     callback = aggregate_results.s(run_id)
-    chord(subtasks)(callback)
+    chord = subtasks | callback
+    chord.apply_async()
     log.info('Experiment %s: dispatched %d case tasks.', run_id, run.total_cases)
+    return {'status': 'running', 'cases': run.total_cases}
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=10)
 def run_case(self, run_id: str, benchmark_case_id: str):
     """
-    Run CARMA pipeline for a single benchmark case.
-    Returns adaptation result dict.
+    Run the CARMA pipeline for a single benchmark case.
+
+    :returns: a small summary dict (the full result is persisted as an
+              ``Adaptation``).
     """
-    from apps.experiments.models import ExperimentRun, Adaptation
-    from apps.benchmark.models import BenchmarkCase
-    import time
+    from apps.experiments.models import Adaptation, ExperimentRun
 
     start = time.monotonic()
 
     try:
         run = ExperimentRun.objects.select_related('configuration').get(id=run_id)
-        bc  = BenchmarkCase.objects.select_related(
+        from apps.benchmark.models import BenchmarkCase
+        bc = BenchmarkCase.objects.select_related(
             'case', 'scenario', 'process', 'constraint_set').get(id=benchmark_case_id)
     except Exception as exc:
         log.exception('run_case setup error: %s', exc)
         return {'status': 'failed', 'error': str(exc)}
 
-    config = run.configuration
+    from carma_engine.runners import get_runner
 
     try:
-        # ── 1. State Estimator ──
-        prefix     = bc.case.prefix_trace
-        current_stage = bc.case.current_stage
-
-        # ── 2. CAR Retrieval (if enabled) ──
-        retrieved_docs = []
-        retrieval_scores = {}
-        if config.use_car:
-            from apps.engine.car_retriever import CARRetriever
-            retriever = CARRetriever(
-                process_id=str(bc.process_id),
-                top_k=config.top_k,
-                alpha=config.alpha,
-                beta=config.beta,
-                gamma=config.gamma,
-            )
-            retrieved_docs, retrieval_scores = retriever.retrieve(
-                prefix=prefix,
-                stage=current_stage,
-                perturbation=bc.perturbation,
-            )
-        else:
-            # Plain vector RAG (B2/B4)
-            from apps.engine.car_retriever import plain_vector_rag
-            retrieved_docs = plain_vector_rag(str(bc.process_id), bc.perturbation_text)
-
-        # ── 3. LangGraph Agents ──
-        if config.multi_agent:
-            from apps.engine.agents import run_multi_agent
-            result = run_multi_agent(
-                config=config, prefix=prefix, perturbation=bc.perturbation,
-                retrieved_docs=retrieved_docs, constraint_set=bc.constraint_set,
-                use_scv=config.use_scv,
-            )
-        else:
-            from apps.engine.agents import run_single_llm
-            result = run_single_llm(
-                config=config, prefix=prefix, perturbation=bc.perturbation,
-                retrieved_docs=retrieved_docs,
-            )
-
-        # ── 4. SCV Verification (if enabled) ──
-        scv_approved, scv_token, viol_cost = None, '', 0.0
-        if config.use_scv and result.get('plan'):
-            from apps.engine.scv_verifier import SCVVerifier
-            verifier = SCVVerifier(constraint_set=bc.constraint_set)
-            scv_approved, scv_token, viol_cost = verifier.verify(
-                plan=result['plan'],
-                prefix=prefix,
-                process=bc.process,
-            )
-
-        latency = time.monotonic() - start
-
-        # ── 5. Persist Adaptation ──
-        adaptation = Adaptation.objects.create(
-            run              = run,
-            benchmark_case   = bc,
-            plan_id          = result.get('plan_id', ''),
-            adaptation       = result.get('plan', {}),
-            activity_seq     = result.get('activity_seq', []),
-            confidence       = result.get('confidence'),
-            scv_approved     = scv_approved,
-            scv_token        = scv_token or '',
-            viol_cost        = viol_cost,
-            exec_cost        = result.get('exec_cost', 0.0),
-            total_cost       = viol_cost + result.get('exec_cost', 0.0),
-            retrieved_docs   = retrieved_docs,
-            retrieval_scores = retrieval_scores,
-            task_success     = result.get('task_success'),
-            conformance_fitness = result.get('conformance_fitness'),
-            repair_rounds    = result.get('repair_rounds', 0),
-            status           = result.get('status', 'success'),
-            latency_s        = latency,
-            llm_tokens       = result.get('tokens_used', 0),
-        )
-
-        # ── 6. Audit log entry ──
-        _write_audit(run_id, adaptation)
-
-        # ── 7. Progress update ──
-        run.completed_cases += 1
-        run.save(update_fields=['completed_cases'])
-        _push_progress(run_id, run.total_cases, run.completed_cases, 'running')
-
-        # ── 8. Escalation if needed ──
-        if result.get('needs_escalation'):
-            _create_escalation(adaptation, result)
-
-        return {'adaptation_id': str(adaptation.id), 'status': adaptation.status}
-
+        runner = get_runner(run.configuration.code, config=run.configuration, seed=run.seed)
+        output = runner.run(bc, run.configuration)
     except Exception as exc:
         log.exception('run_case failed for bc=%s: %s', benchmark_case_id, exc)
-        run.failed_cases += 1
-        run.save(update_fields=['failed_cases'])
+        _increment(run, 'failed_cases')
         return {'status': 'failed', 'error': str(exc)}
+
+    latency = time.monotonic() - start
+    output['latency_s'] = output.get('latency_s') or latency
+
+    try:
+        adaptation = Adaptation.objects.create(
+            run                  = run,
+            benchmark_case       = bc,
+            plan_id              = output.get('plan_id', ''),
+            adaptation           = output.get('plan') or {},
+            activity_seq         = output.get('activity_seq') or [],
+            confidence           = output.get('confidence'),
+            scv_approved         = output.get('scv_approved'),
+            scv_token            = output.get('scv_token') or '',
+            viol_cost            = float(output.get('viol_cost') or 0.0),
+            exec_cost            = float(output.get('exec_cost') or 0.0),
+            total_cost           = float(output.get('viol_cost') or 0.0)
+                                   + float(output.get('exec_cost') or 0.0),
+            retrieved_docs       = output.get('retrieved_docs') or [],
+            retrieval_scores     = output.get('retrieval_scores') or {},
+            task_success         = output.get('task_success'),
+            conformance_fitness  = output.get('conformance_fitness'),
+            repair_rounds        = int(output.get('repair_rounds') or 0),
+            status               = output.get('status') or 'failed',
+            latency_s            = output['latency_s'],
+            llm_tokens           = int(output.get('tokens_used') or 0),
+        )
+    except Exception as exc:
+        log.exception('Could not persist adaptation for bc=%s: %s', benchmark_case_id, exc)
+        _increment(run, 'failed_cases')
+        return {'status': 'failed', 'error': str(exc)}
+
+    _write_audit(run, bc, adaptation, output)
+    _increment(run, 'completed_cases')
+    _push_progress(run_id, run.total_cases, run.completed_cases, 'running')
+
+    if output.get('needs_escalation'):
+        _create_escalation(adaptation, output)
+
+    return {'adaptation_id': str(adaptation.id), 'status': adaptation.status}
 
 
 @shared_task
 def aggregate_results(results, run_id: str):
-    """Chord callback — aggregate metrics after all cases complete."""
-    from apps.experiments.models import ExperimentRun, Adaptation, RunResult
-    from django.db.models import Avg, Count, Q
-    import numpy as np
+    """Chord callback — aggregate metrics after all cases have completed."""
+    from apps.experiments.models import Adaptation, ExperimentRun, RunResult
 
     try:
         run = ExperimentRun.objects.get(id=run_id)
         adaptations = Adaptation.objects.filter(run=run)
 
-        aggs = adaptations.aggregate(
-            mean_tsr   = Avg('task_success'),
-            mean_cvr   = Avg('viol_cost'),
-            mean_fitness = Avg('conformance_fitness'),
-            mean_lat   = Avg('latency_s'),
-            mean_exec  = Avg('exec_cost'),
-            mean_viol  = Avg('viol_cost'),
-            total_tokens = Count('llm_tokens'),
+        # PostgreSQL cannot cast boolean to a numeric type, so the boolean
+        # outcome is mapped to 1.0/0.0 explicitly.  AVG() ignores the NULL
+        # default, so adaptations without a recorded outcome are excluded
+        # from both the numerator and the denominator.
+        task_success_rate = Case(
+            When(task_success=True, then=Value(1.0)),
+            When(task_success=False, then=Value(0.0)),
+            default=Value(None),
+            output_field=FloatField(),
         )
 
-        latencies = list(adaptations.values_list('latency_s', flat=True))
-        p95 = float(np.percentile(latencies, 95)) if latencies else None
+        aggs = adaptations.aggregate(
+            mean_tsr     = Avg(task_success_rate),
+            mean_fitness = Avg('conformance_fitness'),
+            mean_lat     = Avg('latency_s'),
+            mean_exec    = Avg('exec_cost'),
+            mean_viol    = Avg('viol_cost'),
+            total_tokens = Sum('llm_tokens'),
+            n            = Count('id'),
+            n_violations = Count('id', filter=Q(viol_cost__gt=0)),
+            n_escalated  = Count('id', filter=Q(status='escalated')),
+            n_success    = Count('id', filter=Q(status='success')),
+        )
+
+        total = aggs['n'] or 0
+        # Constraint Violation Rate = share of adaptations that violated at
+        # least one constraint (not the mean violation cost).
+        cvr = (aggs['n_violations'] / total) if total else None
+        escalation_rate = (aggs['n_escalated'] / total) if total else None
+        repair_rate = (aggs['n_success'] / total) if total else None
+
+        latencies = [value for value in adaptations.values_list('latency_s', flat=True)
+                     if value is not None]
+        p95 = float(_percentile(latencies, 95)) if latencies else None
 
         RunResult.objects.update_or_create(
             run=run,
             defaults={
                 'task_success_rate':    aggs['mean_tsr'],
-                'constraint_viol_rate': aggs['mean_cvr'],
+                'constraint_viol_rate': cvr,
                 'conformance_fitness':  aggs['mean_fitness'],
+                'escalation_rate':      escalation_rate,
+                'repair_rate':          repair_rate,
                 'mean_latency_s':       aggs['mean_lat'],
                 'p95_latency_s':        p95,
                 'mean_viol_cost':       aggs['mean_viol'],
                 'mean_exec_cost':       aggs['mean_exec'],
                 'total_llm_tokens':     aggs['total_tokens'] or 0,
-            }
+            },
         )
+
+        _write_run_metrics(run)
 
         run.status       = 'completed'
         run.completed_at = timezone.now()
         run.save(update_fields=['status', 'completed_at'])
 
         _push_progress(run_id, run.total_cases, run.completed_cases, 'completed')
-        log.info('Experiment %s completed. TSR=%.3f', run_id, aggs.get('mean_tsr') or 0)
-
+        log.info('Experiment %s completed. TSR=%s', run_id, aggs.get('mean_tsr'))
     except Exception as exc:
         log.exception('aggregate_results failed for run=%s: %s', run_id, exc)
         ExperimentRun.objects.filter(id=run_id).update(
@@ -222,11 +202,83 @@ def aggregate_results(results, run_id: str):
 
 
 # ── Helpers ────────────────────────────────────────────────────
+def _increment(run, field: str):
+    """Atomically increment a counter on the run."""
+    from django.db.models import F
+
+    from apps.experiments.models import ExperimentRun
+
+    ExperimentRun.objects.filter(id=run.id).update(**{field: F(field) + 1})
+    run.refresh_from_db(fields=[field])
+
+
+def _percentile(values: list, percentile: float) -> float:
+    """Linear-interpolation percentile (numpy-free)."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    position = (len(ordered) - 1) * (percentile / 100.0)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return float(ordered[lower] * (1 - weight) + ordered[upper] * weight)
+
+
+def _write_run_metrics(run):
+    """Persist the per-scenario metric snapshots used by the metrics screens."""
+    from apps.experiments.models import Adaptation
+    from apps.metrics.models import RunMetrics
+
+    adaptations = Adaptation.objects.filter(run=run).select_related('benchmark_case')
+    rows = {}
+
+    def _blank():
+        return {'tsr': None, 'cvr': None, 'conformance': None,
+                'escalation_rate': None, 'mean_latency': None,
+                'p95_latency': None, 'n': 0, 'n_viol': 0, 'n_esc': 0}
+
+    for scenario_code in [''] + sorted(
+            {a.benchmark_case.scenario.code for a in adaptations}):
+        bucket = _blank()
+        latencies = []
+        for adaptation in adaptations:
+            if scenario_code and adaptation.benchmark_case.scenario.code != scenario_code:
+                continue
+            bucket['n'] += 1
+            if adaptation.task_success is not None:
+                bucket['tsr'] = (bucket['tsr'] or 0) + (1.0 if adaptation.task_success else 0.0)
+            if adaptation.viol_cost and adaptation.viol_cost > 0:
+                bucket['n_viol'] += 1
+            if adaptation.status == 'escalated':
+                bucket['n_esc'] += 1
+            if adaptation.conformance_fitness is not None:
+                bucket['conformance'] = (bucket['conformance'] or 0) + adaptation.conformance_fitness
+            if adaptation.latency_s is not None:
+                latencies.append(adaptation.latency_s)
+        if not bucket['n']:
+            continue
+        RunMetrics.objects.update_or_create(
+            run=run, scenario_code=scenario_code,
+            defaults={
+                'tsr': (bucket['tsr'] or 0) / bucket['n'],
+                'cvr': bucket['n_viol'] / bucket['n'],
+                'conformance': (bucket['conformance'] or 0) / bucket['n'],
+                'escalation_rate': bucket['n_esc'] / bucket['n'],
+                'mean_latency': (sum(latencies) / len(latencies)) if latencies else None,
+                'p95_latency': _percentile(latencies, 95) if latencies else None,
+            },
+        )
+        rows[scenario_code] = bucket
+
+
 def _push_progress(run_id, total, completed, status):
-    """Push real-time progress to WebSocket channel group."""
+    """Push real-time progress to the WebSocket channel group."""
     try:
-        from channels.layers import get_channel_layer
         from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+
         layer = get_channel_layer()
         async_to_sync(layer.group_send)(
             f'run_{run_id}',
@@ -234,7 +286,7 @@ def _push_progress(run_id, total, completed, status):
                 'type': 'experiment_log',
                 'data': {
                     'type':      'progress',
-                    'run_id':    run_id,
+                    'run_id':    str(run_id),
                     'total':     total,
                     'completed': completed,
                     'pct':       round(completed / total * 100, 1) if total else 0,
@@ -243,66 +295,92 @@ def _push_progress(run_id, total, completed, status):
                 }
             }
         )
-    except Exception as e:
-        log.debug('WebSocket push failed: %s', e)
+    except Exception as exc:
+        log.debug('WebSocket push failed: %s', exc)
 
 
-def _write_audit(run_id, adaptation):
-    """Append a hash-chained audit entry for the completed adaptation."""
-    try:
-        from apps.audit.models import AuditLogEntry
-        last = AuditLogEntry.objects.filter(run_id=run_id).order_by('-sequence_num').first()
-        seq  = (last.sequence_num + 1) if last else 1
-        prev = last.entry_hash if last else '0' * 64
+def _write_audit(run, benchmark_case, adaptation, output):
+    """Append the hash-chained audit entries for one completed adaptation."""
+    from apps.audit.services import append_audit_entry
 
-        AuditLogEntry.objects.create(
-            sequence_num  = seq,
-            prev_hash     = prev,
-            entry_type    = 'action',
-            run_id        = run_id,
-            adaptation_id = adaptation.id,
-            case_id       = adaptation.benchmark_case.case.case_id,
-            actor_agent   = 'executor',
-            payload       = {
-                'status':     adaptation.status,
-                'viol_cost':  adaptation.viol_cost,
-                'exec_cost':  adaptation.exec_cost,
-                'latency_s':  adaptation.latency_s,
-                'scv_token':  adaptation.scv_token,
-            },
-        )
-    except Exception as e:
-        log.warning('Audit write failed: %s', e)
+    run_id = run.id
+    case_id = benchmark_case.case.case_id
+
+    entries = [
+        ('retrieval', {
+            'documents': output.get('retrieved_docs') or [],
+            'scores': output.get('retrieval_scores') or {},
+        }, 'retriever'),
+        ('plan', {
+            'plan_id': adaptation.plan_id,
+            'plan': adaptation.adaptation,
+            'activity_seq': adaptation.activity_seq,
+            'confidence': adaptation.confidence,
+        }, 'planner'),
+        ('scv_check', {
+            'approved': adaptation.scv_approved,
+            'token': adaptation.scv_token,
+            'violation_cost': adaptation.viol_cost,
+            'violation_report': output.get('violation_report') or {},
+        }, 'scv'),
+        ('action', {
+            'status': adaptation.status,
+            'exec_cost': adaptation.exec_cost,
+            'total_cost': adaptation.total_cost,
+            'latency_s': adaptation.latency_s,
+            'repair_rounds': adaptation.repair_rounds,
+        }, 'executor'),
+    ]
+
+    for entry_type, payload, actor in entries:
+        try:
+            append_audit_entry(
+                entry_type=entry_type,
+                payload=payload,
+                run_id=run_id,
+                adaptation_id=adaptation.id,
+                case_id=case_id,
+                actor_agent=actor,
+            )
+        except Exception as exc:
+            log.warning('Audit write failed (%s): %s', entry_type, exc)
 
 
-def _create_escalation(adaptation, result):
+def _create_escalation(adaptation, output):
     """Create an escalation record for low-confidence or violation cases."""
     try:
         from apps.reviews.models import Escalation
-        reason = 'low_confidence' if result.get('confidence', 1) < 0.5 else 'scv_violation'
+
+        confidence = output.get('confidence')
+        reason = 'low_confidence'
+        if adaptation.scv_approved is False:
+            reason = 'scv_violation'
+        elif output.get('escalation_reason'):
+            reason = 'repair_exhausted' if 'Repair budget' in output['escalation_reason'] else 'policy_breach'
+
         Escalation.objects.get_or_create(
             adaptation=adaptation,
             defaults={
                 'reason':       reason,
-                'reason_detail': result.get('escalation_reason', ''),
-                'confidence':   result.get('confidence'),
+                'reason_detail': output.get('escalation_reason', ''),
+                'confidence':   confidence,
                 'viol_cost':    adaptation.viol_cost,
                 'priority':     1 if adaptation.viol_cost > 5 else 2,
             }
         )
-        # Notify review queue via WebSocket
         try:
-            from channels.layers import get_channel_layer
             from asgiref.sync import async_to_sync
+            from channels.layers import get_channel_layer
+
             async_to_sync(get_channel_layer().group_send)(
                 'review_queue',
                 {'type': 'review_notification', 'data': {
-                    'type':         'new_escalation',
+                    'type':          'new_escalation',
                     'adaptation_id': str(adaptation.id),
-                    'reason':       reason,
+                    'reason':        reason,
                 }}
             )
         except Exception:
             pass
-    except Exception as e:
-        log.warning('Escalation create failed: %s', e)
+    except Exception as exc:
+        log.warning('Escalation create failed: %s', exc)

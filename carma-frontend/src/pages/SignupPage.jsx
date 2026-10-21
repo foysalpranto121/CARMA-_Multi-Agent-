@@ -26,9 +26,20 @@ const ROLES = [
     desc:'Review escalated cases, approve plans' },
   { value:'annotator',  label:'Annotator',  icon:'✏️',
     desc:'Annotate gold adaptations, compute κ' },
-  { value:'admin',      label:'Admin',      icon:'👑',
-    desc:'Full platform access and user management' },
 ];
+
+/** Extract a human-readable message from a DRF error response. */
+function readApiError(err) {
+  const data = err?.response?.data;
+  if (!data) return err?.message ?? 'Unable to reach the CARMA API.';
+  if (typeof data === 'string') return data;
+  if (data.detail) return data.detail;
+  const first = Object.entries(data)[0];
+  if (!first) return 'Registration failed.';
+  const [field, value] = first;
+  const message = Array.isArray(value) ? value[0] : value;
+  return `${field}: ${message}`;
+}
 
 export default function SignupPage() {
   const navigate = useNavigate();
@@ -75,32 +86,20 @@ export default function SignupPage() {
     setLoading(true);
 
     try {
-      /* Try real API, fall back to mock */
-      try {
-        const res = await authApi.register({
-          email:      form.email,
-          username:   form.email,
-          password:   form.password,
-          first_name: form.firstName,
-          last_name:  form.lastName,
-          role:       form.role,
-        });
-        const loginRes = await authApi.login(form.email, form.password);
-        login(loginRes.data.user, loginRes.data.access, loginRes.data.refresh);
-      } catch {
-        /* Mock: auto-login after registration */
-        login(
-          {
-            id: String(Date.now()), username: form.email, email: form.email,
-            role: form.role, firstName: form.firstName, lastName: form.lastName,
-          },
-          'mock-access-token',
-          'mock-refresh-token'
-        );
-      }
+      const res = await authApi.register({
+        email:      form.email,
+        username:   form.email,
+        password:   form.password,
+        password2:  form.confirm,
+        first_name: form.firstName,
+        last_name:  form.lastName,
+        role:       form.role,
+      });
+      const { user, access, refresh } = res.data;
+      login(user, access, refresh);
       setStep(3);
     } catch (err) {
-      setApiError(err.response?.data?.detail ?? 'Registration failed. Please try again.');
+      setApiError(readApiError(err));
     } finally {
       setLoading(false);
     }
@@ -421,10 +420,8 @@ export default function SignupPage() {
                     checked={form.agree}
                     onChange={(e) => set('agree', e.target.checked)}
                   />
-                  I agree to the{' '}
-                  <a href="#">Terms of Service</a> and{' '}
-                  <a href="#">Research Data Policy</a>. All experiment data
-                  will be used solely for academic research.
+                  I agree to the Terms of Service and the Research Data Policy.
+                  All experiment data will be used solely for academic research.
                 </label>
 
                 <div style={{ display:'flex', gap:10 }}>

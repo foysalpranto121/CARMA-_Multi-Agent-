@@ -18,7 +18,7 @@ class RequestLoggingMiddleware:
             user = getattr(request, 'user', None)
             uid  = str(user.id) if user and user.is_authenticated else 'anon'
             log.info(
-                '%s %s → %s [%sms] user=%s ip=%s',
+                '%s %s -> %s [%sms] user=%s ip=%s',
                 request.method,
                 request.path,
                 response.status_code,

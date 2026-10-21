@@ -1,0 +1,17 @@
+# ══════════════════════════════════════════════════════════════
+# CARMA Backend — Optional Extras
+#
+# Not required to run the platform.  Install only what a specific
+# analysis needs:
+#
+#     pip install -r requirements-optional.txt
+# ══════════════════════════════════════════════════════════════
+
+# Mixed-effects logistic regression for the CAR x SCV interaction
+# effect (RQ3) and for the configuration x model interaction (RQ4).
+statsmodels==0.14.4
+
+# Cross-checking the built-in Declare-style automata checker in
+# carma_engine/verifier/declare_checker.py against a reference
+# implementation.
+declare4py==0.3.0

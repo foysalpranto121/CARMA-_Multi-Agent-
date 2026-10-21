@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Mail, Lock, Eye, EyeOff, ArrowLeft, Zap, AlertCircle } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
@@ -6,21 +6,17 @@ import { authApi } from '../api/client';
 import HoloOrb from '../components/HoloOrb';
 import '../auth.css';
 
-/* ── Mock login for offline development ── */
-const MOCK_USERS = {
-  'admin@carma.ai':      { password: 'carma123', role: 'admin',      firstName: 'Admin' },
-  'researcher@carma.ai': { password: 'carma123', role: 'researcher',  firstName: 'Researcher' },
-  'reviewer@carma.ai':   { password: 'carma123', role: 'reviewer',   firstName: 'Reviewer' },
-};
-
-function mockLogin(email, password) {
-  const user = MOCK_USERS[email];
-  if (!user || user.password !== password) throw new Error('Invalid credentials');
-  return {
-    user:    { id: '1', username: email, email, role: user.role, firstName: user.firstName },
-    access:  'mock-access-token',
-    refresh: 'mock-refresh-token',
-  };
+/** Extract a human-readable message from a DRF error response. */
+function readApiError(err) {
+  const data = err?.response?.data;
+  if (!data) return err?.message ?? 'Unable to reach the CARMA API.';
+  if (typeof data === 'string') return data;
+  if (data.detail) return data.detail;
+  const first = Object.entries(data)[0];
+  if (!first) return 'Login failed.';
+  const [field, value] = first;
+  const message = Array.isArray(value) ? value[0] : value;
+  return `${field}: ${message}`;
 }
 
 export default function LoginPage() {
@@ -43,33 +39,15 @@ export default function LoginPage() {
 
     setLoading(true);
     try {
-      /* Try real API first, fall back to mock */
-      let data;
-      try {
-        const res = await authApi.login(email, password);
-        data = res.data;
-      } catch {
-        data = mockLogin(email, password);
-      }
-      login(data.user, data.access, data.refresh);
+      const res = await authApi.login(email, password);
+      const { access, refresh, user } = res.data;
+      login(user, access, refresh);
       navigate(from, { replace: true });
     } catch (err) {
-      setError(err.message ?? 'Invalid email or password.');
+      setError(readApiError(err));
     } finally {
       setLoading(false);
     }
-  };
-
-  /* Quick-fill demo credentials */
-  const fillDemo = (role) => {
-    const map = {
-      admin:      'admin@carma.ai',
-      researcher: 'researcher@carma.ai',
-      reviewer:   'reviewer@carma.ai',
-    };
-    setEmail(map[role]);
-    setPassword('carma123');
-    setError('');
   };
 
   return (
@@ -148,13 +126,7 @@ export default function LoginPage() {
 
               {/* Password */}
               <div className="auth-field">
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                  <label className="form-label" htmlFor="login-password">Password</label>
-                  <a href="#" style={{ fontSize:10, color:'var(--holo-cyan)', textDecoration:'none',
-                                       fontFamily:'var(--font-mono)', letterSpacing:'0.05em' }}>
-                    Forgot password?
-                  </a>
-                </div>
+                <label className="form-label" htmlFor="login-password">Password</label>
                 <div className="input-wrapper">
                   <Lock size={14} className="input-icon" />
                   <input
@@ -191,36 +163,6 @@ export default function LoginPage() {
                 }
               </button>
             </form>
-
-            {/* Demo credentials */}
-            <div className="auth-divider" style={{ marginTop: 20 }}>
-              <div className="auth-divider-line" />
-              <span className="auth-divider-text">Demo Access</span>
-              <div className="auth-divider-line" />
-            </div>
-
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:8 }}>
-              {[
-                { role:'admin',      label:'Admin',      color:'cyan',   icon:'👑' },
-                { role:'researcher', label:'Researcher', color:'violet', icon:'🔬' },
-                { role:'reviewer',   label:'Reviewer',   color:'gold',   icon:'🛡️' },
-              ].map(d => (
-                <button
-                  key={d.role}
-                  type="button"
-                  className={`role-option`}
-                  onClick={() => fillDemo(d.role)}
-                  id={`demo-${d.role}-btn`}
-                  title={`Fill demo credentials for ${d.label}`}
-                >
-                  <span className="role-option-icon">{d.icon}</span>
-                  <span className={`role-option-label`}
-                        style={{ color:`var(--holo-${d.color})` }}>
-                    {d.label}
-                  </span>
-                </button>
-              ))}
-            </div>
 
             {/* Switch to signup */}
             <div className="auth-switch">

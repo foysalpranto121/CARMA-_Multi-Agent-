@@ -47,6 +47,12 @@ class RunConfiguration(models.Model):
     beta            = models.FloatField(default=0.2, help_text='Proximity weight β')
     gamma           = models.FloatField(default=0.2, help_text='Stage-match weight γ')
 
+    # Agent behaviour
+    k_repair_rounds = models.PositiveSmallIntegerField(
+        default=3, help_text='Maximum planner repair rounds before escalation')
+    tau_threshold   = models.FloatField(
+        default=0.5, help_text='Confidence threshold τ for human escalation')
+
     created_at      = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -74,7 +80,7 @@ class ExperimentRun(models.Model):
     configuration= models.ForeignKey(RunConfiguration, on_delete=models.CASCADE,
                                      related_name='runs')
     process      = models.ForeignKey(Process, on_delete=models.CASCADE,
-                                     related_name='runs', null=True)
+                                     related_name='runs', null=True, blank=True)
     constraint_set = models.ForeignKey(ConstraintSet, on_delete=models.SET_NULL,
                                        null=True, blank=True)
 

@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowRight, Github, ExternalLink, Zap, Shield, Database,
+import { ArrowRight, Zap, Shield, Database,
          BarChart3, GitBranch, Cpu, ChevronRight } from 'lucide-react';
 import HoloOrb from '../components/HoloOrb';
 import '../auth.css';
@@ -28,7 +28,7 @@ const FEATURES = [
     icon: '📊',
     color: 'green',
     title: 'WF-Adapt Benchmark',
-    desc: '840 annotated cases across 7 scenario types (S0–S6) over 4 BPI public event logs. Inter-annotator κ reported per constraint set.',
+    desc: 'Target of 840 annotated cases across 7 scenario types (S0–S6) over 4 BPI public event logs. Inter-annotator κ reported per constraint set.',
   },
   {
     icon: '🔗',
@@ -40,12 +40,12 @@ const FEATURES = [
     icon: '📈',
     color: 'rose',
     title: '8-Config × 3-Model Study',
-    desc: 'B0–B7 factorial study with 3 LLMs and 3 seeds each. McNemar, Friedman and mixed-effects logistic regression. Pre-registered on OSF.',
+    desc: 'B0–B7 factorial study with 3 LLMs and 3 seeds each. McNemar, Friedman and mixed-effects logistic regression. Pre-registered analysis plan (H1–H4).',
   },
 ];
 
 const STATS = [
-  { value: '840', label: 'Benchmark Cases' },
+  { value: '840', label: 'Target Cases' },
   { value: '8',   label: 'Configurations' },
   { value: '7',   label: 'Scenario Types' },
   { value: '3',   label: 'LLM Models' },
@@ -77,14 +77,7 @@ export default function HomePage() {
           <div className="home-nav-links">
             <a href="#features"  className="home-nav-link">Features</a>
             <a href="#benchmark" className="home-nav-link">Benchmark</a>
-            <a href="https://arxiv.org" target="_blank" rel="noopener"
-               className="home-nav-link" style={{ display:'flex',alignItems:'center',gap:4 }}>
-              Paper <ExternalLink size={10} />
-            </a>
-            <a href="https://github.com" target="_blank" rel="noopener"
-               className="home-nav-link" style={{ display:'flex',alignItems:'center',gap:4 }}>
-              <Github size={13} /> GitHub
-            </a>
+            <Link to="/login" className="home-nav-link">Sign In</Link>
           </div>
 
           <div className="home-nav-actions">
@@ -130,9 +123,8 @@ export default function HomePage() {
                 <Link to="/login" className="btn btn-primary">
                   Sign In <ChevronRight size={13} />
                 </Link>
-                <a href="https://github.com" target="_blank" rel="noopener"
-                   className="btn btn-ghost" style={{ fontSize:11 }}>
-                  <Github size={13} /> View Code
+                <a href="#features" className="btn btn-ghost" style={{ fontSize: 11 }}>
+                  <Cpu size={13} /> Architecture
                 </a>
               </div>
 
@@ -226,18 +218,19 @@ export default function HomePage() {
                 Public · Reproducible · Pre-registered
               </h3>
               <p style={{ fontSize:12, color:'var(--text-muted)', lineHeight:1.7, maxWidth:480 }}>
-                840 annotated cases across S0–S6 scenarios. BPI 2017, 2019, 2020 and RTFM logs.
-                Full artifact bundle released on OSF · GitHub · Zenodo under MIT + CC-BY-4.0.
+                Target of 840 annotated cases across S0–S6 scenarios, built from the
+                BPI 2017, 2019, 2020 and RTFM event logs. Annotation agreement (κ) is
+                reported per constraint set, and the artifact bundle is released for
+                academic reuse.
               </p>
             </div>
             <div style={{ flexShrink:0, display:'flex', flexDirection:'column', gap:10 }}>
               <Link to="/signup" className="btn btn-solid" style={{ whiteSpace:'nowrap' }}>
                 <Database size={13} /> Access Benchmark
               </Link>
-              <a href="https://osf.io" target="_blank" rel="noopener"
-                 className="btn btn-ghost" style={{ whiteSpace:'nowrap', fontSize:11 }}>
-                <ExternalLink size={12} /> OSF Pre-registration
-              </a>
+              <Link to="/login" className="btn btn-ghost" style={{ whiteSpace:'nowrap', fontSize:11 }}>
+                <Shield size={12} /> Sign in to contribute
+              </Link>
             </div>
           </div>
         </section>
@@ -245,20 +238,15 @@ export default function HomePage() {
         {/* ── Footer ──────────────────────────────────── */}
         <footer className="home-footer">
           <span>© 2026 CARMA Research Platform · MIT License</span>
-          <span style={{ display:'flex', gap:24 }}>
-            <a href="https://github.com" target="_blank" rel="noopener"
-               style={{ color:'var(--text-muted)', display:'flex', alignItems:'center',
-                        gap:4, textDecoration:'none' }}>
-              <Github size={11} /> GitHub
-            </a>
-            <a href="https://osf.io" target="_blank" rel="noopener"
-               style={{ color:'var(--text-muted)', textDecoration:'none' }}>
-              OSF
-            </a>
-            <a href="https://zenodo.org" target="_blank" rel="noopener"
-               style={{ color:'var(--text-muted)', textDecoration:'none' }}>
-              Zenodo
-            </a>
+          <span style={{ display:'flex', gap:24, alignItems:'center' }}>
+            <Link to="/login" style={{ color:'var(--text-muted)', display:'flex', alignItems:'center',
+                                      gap:4, textDecoration:'none' }}>
+              <BarChart3 size={11} /> Research console
+            </Link>
+            <Link to="/signup" style={{ color:'var(--text-muted)', display:'flex', alignItems:'center',
+                                       gap:4, textDecoration:'none' }}>
+              <GitBranch size={11} /> Create an account
+            </Link>
           </span>
         </footer>
 

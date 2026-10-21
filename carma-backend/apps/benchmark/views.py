@@ -1,16 +1,23 @@
 """CARMA — Benchmark Views"""
-from rest_framework import viewsets, status, filters
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.decorators import action
+from django.core.files.storage import default_storage
+from django.db.models import Avg, Count
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import EventLog, Case, BenchmarkScenario, BenchmarkCase
+from rest_framework import filters, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from apps.users.permissions import IsAnnotatorOrAdmin, IsResearcherOrAdmin
+
+from .models import BenchmarkCase, BenchmarkScenario, Case, EventLog
 from .serializers import (
-    EventLogSerializer, CaseSerializer,
-    BenchmarkScenarioSerializer, BenchmarkCaseSerializer, BenchmarkCaseListSerializer,
+    BenchmarkCaseListSerializer,
+    BenchmarkCaseSerializer,
+    BenchmarkScenarioSerializer,
+    CaseSerializer,
+    EventLogSerializer,
 )
-from apps.users.permissions import IsResearcherOrAdmin, IsAnnotatorOrAdmin
 
 
 class EventLogViewSet(viewsets.ModelViewSet):
@@ -57,7 +64,6 @@ class BenchmarkCaseViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def stats(self, request):
-        from django.db.models import Count, Avg
         return Response({
             'total':      self.get_queryset().count(),
             'validated':  self.get_queryset().filter(is_validated=True).count(),
@@ -70,15 +76,29 @@ class BenchmarkCaseViewSet(viewsets.ModelViewSet):
 
 
 class ImportLogView(APIView):
-    """Import a BPI XES log and extract cases."""
+    """
+    Import a BPI XES event log and extract its cases.
+
+    The XES file is either uploaded with the request (multipart) or already
+    present in the media storage under ``file_path``.
+    """
     permission_classes = [IsAuthenticated, IsResearcherOrAdmin]
 
     def post(self, request):
-        # Dispatch async import task
         from apps.benchmark.tasks import import_event_log
+
         log_name = request.data.get('log_name')
-        file     = request.FILES.get('file')
         if not log_name:
-            return Response({'detail': 'log_name required.'}, status=400)
-        task = import_event_log.delay(log_name, str(file) if file else None)
-        return Response({'task_id': task.id, 'detail': 'Import started.'}, status=202)
+            return Response({'detail': 'log_name is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        storage_path = None
+        uploaded = request.FILES.get('file')
+        if uploaded is not None:
+            storage_path = default_storage.save(f'event_logs/{uploaded.name}', uploaded)
+        elif request.data.get('file_path'):
+            storage_path = request.data['file_path']
+
+        task = import_event_log.delay(log_name, None, storage_path)
+        return Response({'task_id': task.id, 'detail': 'Import started.'},
+                        status=status.HTTP_202_ACCEPTED)

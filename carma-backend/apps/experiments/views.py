@@ -1,20 +1,33 @@
 """CARMA — Experiment Views"""
-from rest_framework import viewsets, status, filters
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.decorators import action
-from django_filters.rest_framework import DjangoFilterBackend
-from django.utils import timezone
-import csv, io
-from django.http import HttpResponse
+import csv
+import io
 
-from .models import RunConfiguration, ExperimentRun, Adaptation, RunResult
+from django_filters.rest_framework import DjangoFilterBackend
+from django.http import HttpResponse
+from django.utils import timezone
+from rest_framework import filters, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from apps.users.permissions import IsOwnerOrAdmin, IsResearcherOrAdmin
+
+from .models import Adaptation, ExperimentRun, RunConfiguration, RunResult
 from .serializers import (
-    RunConfigurationSerializer, ExperimentRunSerializer,
-    ExperimentRunListSerializer, AdaptationSerializer, RunResultSerializer,
+    AdaptationSerializer,
+    ExperimentRunListSerializer,
+    ExperimentRunSerializer,
+    RunConfigurationSerializer,
+    RunResultSerializer,
 )
-from apps.users.permissions import IsResearcherOrAdmin, IsOwnerOrAdmin
+
+EXPORT_COLUMNS = [
+    'adaptation_id', 'run_id', 'config_code', 'seed', 'case_id', 'scenario',
+    'status', 'task_success', 'viol_cost', 'exec_cost', 'total_cost',
+    'conformance_fitness', 'latency_s', 'repair_rounds', 'scv_approved',
+    'llm_tokens',
+]
 
 
 class RunConfigurationViewSet(viewsets.ModelViewSet):
@@ -28,6 +41,7 @@ class RunConfigurationViewSet(viewsets.ModelViewSet):
 class ExperimentRunViewSet(viewsets.ModelViewSet):
     queryset           = ExperimentRun.objects.select_related(
                             'configuration', 'created_by').all()
+    serializer_class   = ExperimentRunSerializer
     permission_classes = [IsAuthenticated]
     filter_backends    = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields   = ['status', 'configuration', 'seed']
@@ -38,57 +52,31 @@ class ExperimentRunViewSet(viewsets.ModelViewSet):
             return ExperimentRunListSerializer
         return ExperimentRunSerializer
 
+    def get_permissions(self):
+        if self.action in ('create', 'update', 'partial_update', 'destroy'):
+            return [IsAuthenticated(), IsResearcherOrAdmin(), IsOwnerOrAdmin()]
+        return [IsAuthenticated()]
+
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
-    @action(detail=True, methods=['post'])
-    def start(self, request, pk=None):
-        run = self.get_object()
-        if run.status not in ('pending', 'paused'):
-            return Response({'detail': f'Cannot start a {run.status} run.'}, status=400)
-        from apps.experiments.tasks import run_experiment
-        task = run_experiment.delay(str(run.id))
-        run.celery_task_id = task.id
-        run.status         = 'running'
-        run.started_at     = timezone.now()
-        run.save(update_fields=['celery_task_id', 'status', 'started_at'])
-        return Response({'detail': 'Experiment started.', 'task_id': task.id})
+    @action(detail=False, methods=['get'])
+    def matrix(self, request):
+        """
+        The B0-B7 configuration matrix (the factorial design of the study).
+        """
+        from carma_engine.runners import RUNNER_MATRIX  # noqa: PLC0415
 
-    @action(detail=True, methods=['post'])
-    def pause(self, request, pk=None):
-        run = self.get_object()
-        if run.status != 'running':
-            return Response({'detail': 'Only running experiments can be paused.'}, status=400)
-        from celery.app.control import Control
-        from config.celery import app as celery_app
-        Control(celery_app).revoke(run.celery_task_id, terminate=False)
-        run.status = 'paused'
-        run.save(update_fields=['status'])
-        return Response({'detail': 'Experiment paused.'})
-
-    @action(detail=True, methods=['get'])
-    def export(self, request, pk=None):
-        run = self.get_object()
-        adaptations = Adaptation.objects.filter(run=run).select_related('benchmark_case')
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow([
-            'adaptation_id', 'case_id', 'scenario', 'status',
-            'task_success', 'viol_cost', 'exec_cost', 'total_cost',
-            'conformance_fitness', 'latency_s', 'repair_rounds', 'scv_approved',
-        ])
-        for a in adaptations:
-            writer.writerow([
-                str(a.id), a.benchmark_case.case.case_id,
-                a.benchmark_case.scenario.code,
-                a.status, a.task_success,
-                a.viol_cost, a.exec_cost, a.total_cost,
-                a.conformance_fitness, a.latency_s,
-                a.repair_rounds, a.scv_approved,
-            ])
-        response = HttpResponse(output.getvalue(), content_type='text/csv')
-        response['Content-Disposition'] = f'attachment; filename="run_{run.id}_results.csv"'
-        return response
+        rows = []
+        for code, runner_class in sorted(RUNNER_MATRIX.items()):
+            rows.append({
+                'code': code,
+                'retrieval': runner_class.retrieval_type,
+                'multi_agent': runner_class.multi_agent,
+                'use_scv': runner_class.use_scv,
+                'num_agents': runner_class.num_agents,
+            })
+        return Response(rows)
 
 
 class RunResultViewSet(viewsets.ReadOnlyModelViewSet):
@@ -96,7 +84,7 @@ class RunResultViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class   = RunResultSerializer
     permission_classes = [IsAuthenticated]
     filter_backends    = [DjangoFilterBackend]
-    filterset_fields   = ['run__configuration', 'run__seed']
+    filterset_fields   = ['run', 'run__configuration', 'run__seed']
 
 
 class AdaptationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -108,12 +96,12 @@ class AdaptationViewSet(viewsets.ReadOnlyModelViewSet):
     ordering_fields    = ['created_at', 'viol_cost', 'latency_s']
 
 
-# ── Action views wired directly (no proxy needed) ──────────────
+# ── Action views ───────────────────────────────────────────────
 class StartExperimentView(APIView):
+    """Start a pending (or paused) experiment run."""
     permission_classes = [IsAuthenticated, IsResearcherOrAdmin]
 
     def post(self, request, pk):
-        from .models import ExperimentRun
         try:
             run = ExperimentRun.objects.get(pk=pk)
         except ExperimentRun.DoesNotExist:
@@ -121,7 +109,9 @@ class StartExperimentView(APIView):
         if run.status not in ('pending', 'paused'):
             return Response({'detail': f'Cannot start a {run.status} run.'},
                             status=status.HTTP_400_BAD_REQUEST)
+
         from apps.experiments.tasks import run_experiment
+
         task = run_experiment.delay(str(run.id))
         run.celery_task_id = task.id
         run.status         = 'running'
@@ -131,10 +121,10 @@ class StartExperimentView(APIView):
 
 
 class PauseExperimentView(APIView):
+    """Pause a running experiment run."""
     permission_classes = [IsAuthenticated, IsResearcherOrAdmin]
 
     def post(self, request, pk):
-        from .models import ExperimentRun
         try:
             run = ExperimentRun.objects.get(pk=pk)
         except ExperimentRun.DoesNotExist:
@@ -144,7 +134,9 @@ class PauseExperimentView(APIView):
                             status=status.HTTP_400_BAD_REQUEST)
         if run.celery_task_id:
             from celery.app.control import Control
+
             from config.celery import app as celery_app
+
             Control(celery_app).revoke(run.celery_task_id, terminate=False)
         run.status = 'paused'
         run.save(update_fields=['status'])
@@ -152,36 +144,41 @@ class PauseExperimentView(APIView):
 
 
 class ExportResultsView(APIView):
+    """Export the adaptations of a run as CSV."""
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        from .models import ExperimentRun, Adaptation
         try:
-            run = ExperimentRun.objects.get(pk=pk)
+            run = ExperimentRun.objects.select_related('configuration').get(pk=pk)
         except ExperimentRun.DoesNotExist:
             return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
         adaptations = Adaptation.objects.filter(run=run).select_related(
             'benchmark_case__scenario', 'benchmark_case__case')
-        import csv, io
-        from django.http import HttpResponse
+
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow([
-            'adaptation_id', 'case_id', 'scenario', 'status',
-            'task_success', 'viol_cost', 'exec_cost', 'total_cost',
-            'conformance_fitness', 'latency_s', 'repair_rounds', 'scv_approved',
-        ])
-        for a in adaptations:
+        writer.writerow(EXPORT_COLUMNS)
+        for adaptation in adaptations:
             writer.writerow([
-                str(a.id),
-                a.benchmark_case.case.case_id,
-                a.benchmark_case.scenario.code,
-                a.status, a.task_success,
-                a.viol_cost, a.exec_cost, a.total_cost,
-                a.conformance_fitness, a.latency_s,
-                a.repair_rounds, a.scv_approved,
+                str(adaptation.id),
+                str(run.id),
+                run.configuration.code,
+                run.seed,
+                adaptation.benchmark_case.case.case_id,
+                adaptation.benchmark_case.scenario.code,
+                adaptation.status,
+                adaptation.task_success,
+                adaptation.viol_cost,
+                adaptation.exec_cost,
+                adaptation.total_cost,
+                adaptation.conformance_fitness,
+                adaptation.latency_s,
+                adaptation.repair_rounds,
+                adaptation.scv_approved,
+                adaptation.llm_tokens,
             ])
+
         response = HttpResponse(output.getvalue(), content_type='text/csv')
         response['Content-Disposition'] = f'attachment; filename="run_{run.id}_results.csv"'
         return response
-

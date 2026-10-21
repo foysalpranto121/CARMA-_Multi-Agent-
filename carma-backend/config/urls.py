@@ -41,10 +41,13 @@ from apps.experiments.views import (
     StartExperimentView, PauseExperimentView, ExportResultsView,
 )
 from apps.metrics.views import (
-    RunMetricsViewSet, StatisticalTestsView, CostBreakdownView,
+    RunMetricsViewSet, StatisticalTestsView, CostBreakdownView, ScenarioBreakdownView,
 )
 from apps.reviews.views import EscalationViewSet, HumanReviewViewSet
 from apps.audit.views import AuditLogEntryViewSet, VerifyChainView, ReplayView
+
+# ── Platform views ─────────────────────────────────────────────
+from config.views import SystemStatusView
 
 # ── DRF Router ─────────────────────────────────────────────────
 from rest_framework.routers import DefaultRouter
@@ -88,12 +91,16 @@ api_v1_patterns = [
     path('experiments/<uuid:pk>/export/', ExportResultsView.as_view(),    name='experiment-export'),
 
     # Metrics & stats
-    path('metrics/statistical-tests/', StatisticalTestsView.as_view(), name='stats-tests'),
-    path('metrics/cost-breakdown/',    CostBreakdownView.as_view(),    name='cost-breakdown'),
+    path('metrics/statistical-tests/',  StatisticalTestsView.as_view(),  name='stats-tests'),
+    path('metrics/cost-breakdown/',     CostBreakdownView.as_view(),     name='cost-breakdown'),
+    path('metrics/scenario-breakdown/', ScenarioBreakdownView.as_view(), name='scenario-breakdown'),
 
     # Audit
     path('audit/verify-chain/',                     VerifyChainView.as_view(), name='audit-verify'),
     path('audit/replay/<uuid:adaptation_id>/',       ReplayView.as_view(),      name='audit-replay'),
+
+    # Platform
+    path('system/status/',            SystemStatusView.as_view(),     name='system-status'),
 
     # Benchmark import
     path('benchmark/import-log/', ImportLogView.as_view(), name='import-log'),

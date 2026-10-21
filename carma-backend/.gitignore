@@ -25,6 +25,7 @@ venv/
 env/
 ENV/
 .venv/
+carma-frontend/venv/
 
 # Environment Variables & Secrets (CRITICAL)
 .env
@@ -43,6 +44,13 @@ media/
 # Django DB
 *.sqlite3
 db.sqlite3
+
+# Public event logs (fetched with scripts/fetch_event_logs.ps1 — too large
+# for version control; the download script and their provenance are tracked)
+data/*.xes
+data/*.xes.gz
+data/*.zip
+data/*.csv
 
 # IDE
 .vscode/
