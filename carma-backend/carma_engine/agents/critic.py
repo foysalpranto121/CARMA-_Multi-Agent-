@@ -22,7 +22,10 @@ log = logging.getLogger('carma')
 CRITIC_SYSTEM = (
     'You are the critic of a constraint-aware workflow adaptation team. '
     'You review a proposed plan against the current process state and the '
-    'evidence it cites. Answer with JSON only.'
+    'evidence it cites.  The plan is the continuation of the case until it '
+    'ends: its first activity must be enabled now, it must contain every '
+    'required activity and no forbidden one, and it must end with one of the '
+    'end activities. Answer with JSON only.'
 )
 
 CRITIC_HUMAN = """Plan (JSON):
@@ -32,6 +35,7 @@ Current stage: {stage}
 Enabled activities: {enabled}
 Required activities: {required}
 Forbidden activities: {forbidden}
+End activities: {end}
 
 Evidence (JSON):
 {evidence}
@@ -91,6 +95,7 @@ def critic_node(llm, tau: float = 0.5, max_repairs: int = 3):
                         enabled=enabled,
                         required=required,
                         forbidden=forbidden,
+                        end=process_state.get('end_activities') or [],
                         evidence=[{'provenance_id': e.get('provenance_id'),
                                    'title': (e.get('payload') or {}).get('title')}
                                   for e in evidence],
@@ -108,15 +113,12 @@ def critic_node(llm, tau: float = 0.5, max_repairs: int = 3):
         if not activities:
             review['goal_reachable'] = False
             review['issues'] = list(review.get('issues') or []) + ['Plan contains no activities.']
-        # An activity is in scope when the model allows it now or when the
-        # frame still owes it.  An activity the frame forbids is out of
-        # scope whatever else is true.
-        in_scope = set(enabled) | set(required)
-        off_stage = [a.get('activity_name') for a in activities
-                     if a.get('activity_name') not in in_scope]
-        if off_stage:
+        # The plan is a continuation: only its first step has to be possible
+        # now; the later ones become possible as the case moves on.
+        first = activities[0].get('activity_name') if activities else None
+        if first and enabled and first not in set(enabled):
             review['issues'] = list(review.get('issues') or []) + [
-                f'Activities not enabled in the current stage: {off_stage}'
+                f'The first activity "{first}" is not enabled in the current stage.'
             ]
         forbidden_used = [a.get('activity_name') for a in activities
                           if a.get('activity_name') in set(forbidden)]

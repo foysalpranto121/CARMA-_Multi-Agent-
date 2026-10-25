@@ -591,6 +591,31 @@ class TestClaudeClient:
         assert sent['model'] == 'qwen2.5:32b'
 
 
+class TestEndActivities:
+    def test_only_frequent_trace_ends_count(self):
+        from apps.benchmark.services.process_discovery import end_activities
+
+        sequences = [['a', 'end1']] * 60 + [['a', 'end2']] * 39 + [['a', 'rare']]
+        assert end_activities(sequences, min_share=0.02) == ['end1', 'end2']
+
+    def test_taken_from_the_training_split_and_cached(self, db):
+        from carma_engine.runners.base import _end_activities
+
+        event_log = EventLog.objects.create(name='helpdesk', display_name='Helpdesk')
+        for index, (split, last) in enumerate([('train', 'Closed'), ('train', 'Closed'),
+                                               ('test', 'Leaked')]):
+            Case.objects.create(event_log=event_log, case_id=f'c{index}',
+                                prefix_trace=[{'activity': 'Insert ticket'},
+                                              {'activity': last}],
+                                attributes={'split': split})
+        process = Process.objects.create(name='Helpdesk', model_xml='',
+                                         metadata={'dataset': 'helpdesk'})
+
+        assert _end_activities(process) == ['Closed']
+        process.refresh_from_db()
+        assert process.metadata['end_activities'] == ['Closed']
+
+
 class TestOpenAIClient:
     def test_sends_the_protocol_sampling_and_records_the_snapshot(self, monkeypatch):
         import io

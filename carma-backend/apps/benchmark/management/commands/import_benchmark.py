@@ -30,6 +30,7 @@ from apps.benchmark.services.process_discovery import (
     build_constraint_set,
     derive_policy_rules,
     discover_model,
+    end_activities,
     mine_declare_constraints,
 )
 from apps.benchmark.services.scenario_builder import build_benchmark
@@ -146,6 +147,7 @@ class Command(BaseCommand):
                     'dataset':    dataset,
                     'discovery':  'inductive_miner',
                     'train_cases': len(train_cases),
+                    'end_activities': end_activities(sequences),
                 },
             },
         )

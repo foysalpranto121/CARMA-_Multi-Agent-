@@ -209,6 +209,23 @@ def discover_model(traces: list, max_traces: int = 5000, seed: int = 42):
     return model_xml, activities, transitions
 
 
+def end_activities(sequences, min_share: float = 0.01, limit: int = 10) -> list[str]:
+    """
+    The activities the training traces end with, most frequent first.
+
+    An activity counts when it ends at least ``min_share`` of the traces.  It
+    tells the agent where the continuation of a case has to arrive, which is
+    process knowledge from the training split — never the end of the case
+    the agent is working on.
+    """
+    counts = Counter(sequence[-1] for sequence in sequences if sequence)
+    total = sum(counts.values())
+    if not total:
+        return []
+    return [activity for activity, count in counts.most_common(limit)
+            if count / total >= min_share]
+
+
 def mine_declare_constraints(cases: list, activities: list) -> list[dict]:
     """
     Mine Declare constraints from the observed behaviour.

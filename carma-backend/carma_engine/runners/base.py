@@ -275,7 +275,8 @@ class BaseRunner:
         initial_state = {
             'perturbation': benchmark_case.perturbation or {},
             'prefix_trace': _executed_prefix(benchmark_case),
-            'process_state': state.to_dict(),
+            'process_state': {**state.to_dict(),
+                              'end_activities': _end_activities(benchmark_case.process)},
             'evidence': evidence,
             'constraint_graph_data': {},
             'plan': None,
@@ -480,6 +481,32 @@ class BaseRunner:
 
 
 # ── helpers ───────────────────────────────────────────────────
+def _end_activities(process) -> list[str]:
+    """
+    The activities the process's training cases end with.
+
+    ``import_benchmark`` records them in ``Process.metadata``; for a process
+    imported before that, they are computed once from the training split and
+    stored.
+    """
+    metadata = dict(getattr(process, 'metadata', None) or {})
+    if 'end_activities' in metadata:
+        return list(metadata['end_activities'] or [])
+    dataset = metadata.get('dataset')
+    if not dataset:
+        return []
+    from apps.benchmark.models import Case  # noqa: PLC0415
+    from apps.benchmark.services.process_discovery import end_activities  # noqa: PLC0415
+
+    traces = (Case.objects.filter(event_log__name=dataset, attributes__split='train')
+              .values_list('prefix_trace', flat=True).iterator())
+    ends = end_activities([event.get('activity') for event in (trace or [])] for trace in traces)
+    metadata['end_activities'] = ends
+    type(process).objects.filter(pk=process.pk).update(metadata=metadata)
+    process.metadata = metadata
+    return ends
+
+
 def _last_timestamp(prefix: list):
     for event in reversed(prefix or []):
         timestamp = event.get('timestamp')
