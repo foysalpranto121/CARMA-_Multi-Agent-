@@ -369,8 +369,9 @@ run, which is the granularity the paired (McNemar / Friedman) tests need.
     python manage.py export_artifacts --output ../artifacts/wf-adapt
 
 The LLM-based configurations need a reachable model endpoint
-(`OPENAI_API_KEY` or `OLLAMA_BASE_URL`); without one the platform refuses
-to record model output and the run falls back to the rule-based behaviour.
+(`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` or `OLLAMA_BASE_URL`);
+without one the platform refuses to record model output: the run stops
+before its first case instead of falling back to the rule-based behaviour.
 """
         path = os.path.join(output, 'README.md')
         with open(path, 'w', encoding='utf-8') as handle:

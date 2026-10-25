@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from ..agents.planner import summarize_evidence
 from ..constraint_knowledge.graph_builder import build_constraint_graph
 from ..escalation.gate import TAU_DEFAULT, should_escalate
-from ..llm.client import LLMUnavailable, build_llm
+from ..llm.client import DEFAULT_MODEL, LLMUnavailable, build_llm
 from ..retriever.constraint_aware import ConstraintAwareRetriever, plain_vector_rag
 from ..state_estimator.replay import estimate_state
 from ..verifier.symbolic import SCVVerifier
@@ -114,7 +114,7 @@ class BaseRunner:
     # ── LLM ───────────────────────────────────────────────────
     def llm(self):
         if self._llm is None:
-            model = getattr(self.config, 'llm_model', 'gpt-4o')
+            model = getattr(self.config, 'llm_model', None) or DEFAULT_MODEL
             temperature = float(getattr(self.config, 'temperature', 0.0) or 0.0)
             max_tokens = int(getattr(self.config, 'max_tokens', 4096) or 4096)
             self._llm = build_llm(model=model, temperature=temperature,

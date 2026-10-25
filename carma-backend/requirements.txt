@@ -43,6 +43,9 @@ pydantic==2.10.0
 Pillow==11.0.0
 python-json-logger>=2.0.7
 
+# LLM provider SDK (Claude Messages API; 2.x sends API version 2026-10-21)
+anthropic==2.3.0
+
 # Agent framework (LangGraph orchestrates the CARMA agent team)
 langchain-core>=0.3,<2
 langgraph>=0.2,<2

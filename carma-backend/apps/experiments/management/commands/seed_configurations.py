@@ -1,7 +1,7 @@
 """
 Seed the B0-B7 experiment configurations from the canonical runner matrix.
 
-    python manage.py seed_configurations [--llm gpt-4o]
+    python manage.py seed_configurations [--llm claude-opus-5-5]
 
 The matrix in ``carma_engine.runners.registry`` is the single source of truth for
 the factorial design; this command mirrors it into the database so that runs
@@ -19,7 +19,7 @@ NAMES = {
     'B3': 'Single LLM + GraphRAG',
     'B4': 'Multi-agent + VectorRAG',
     'B5': 'Multi-agent + Constraint-Aware Retrieval (CAR)',
-    'B6': 'Multi-agent + CAR + Symbolic Constraint Verifier (SCV)',
+    'B6': 'Multi-agent + VectorRAG + Symbolic Constraint Verifier (SCV)',
     'B7': 'CARMA full (CAR + SCV + multi-agent)',
 }
 
@@ -30,7 +30,8 @@ DESCRIPTIONS = {
     'B3': 'B1 plus graph-proximity retrieval over the constraint graph.',
     'B4': 'Four specialist agents with vector retrieval.',
     'B5': 'Four specialist agents with constraint-aware retrieval.',
-    'B6': 'B5 plus the symbolic constraint verifier (SCV).',
+    'B6': 'B4 plus the symbolic constraint verifier (SCV): vector retrieval, '
+          'no constraint-aware retrieval.',
     'B7': 'Full CARMA: constraint-aware retrieval, multi-agent team, SCV '
           'and human escalation.',
 }
@@ -40,7 +41,7 @@ class Command(BaseCommand):
     help = 'Create or update the B0-B7 run configurations from the runner matrix.'
 
     def add_arguments(self, parser):
-        parser.add_argument('--llm', default='gpt-4o',
+        parser.add_argument('--llm', default='claude-opus-5-5',
                             help='Default LLM model for the configurations.')
         parser.add_argument('--temperature', type=float, default=0.0)
         parser.add_argument('--max-tokens', type=int, default=4096)

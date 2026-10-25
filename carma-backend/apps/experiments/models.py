@@ -16,7 +16,10 @@ class RunConfiguration(models.Model):
     """
     CONFIG_CODES = [(f'B{i}', f'B{i}') for i in range(8)]
     MODEL_CHOICES = [
-        ('gpt-4o',          'GPT-4o (Frontier)'),
+        ('claude-opus-5-5',   'Claude Opus 5.5 (Frontier)'),
+        ('claude-sonnet-5-5', 'Claude Sonnet 5.5'),
+        ('claude-haiku-5-5',  'Claude Haiku 5.5'),
+        ('gpt-4o',          'GPT-4o'),
         ('gpt-4o-mini',     'GPT-4o-mini'),
         ('llama3.1-70b',    'Llama 3.1 70B'),
         ('llama3.1-8b',     'Llama 3.1 8B'),
@@ -37,7 +40,7 @@ class RunConfiguration(models.Model):
     num_agents      = models.PositiveSmallIntegerField(default=1)
 
     # LLM settings
-    llm_model       = models.CharField(max_length=50, choices=MODEL_CHOICES, default='gpt-4o')
+    llm_model       = models.CharField(max_length=50, choices=MODEL_CHOICES, default='claude-opus-5-5')
     temperature     = models.FloatField(default=0.0)
     max_tokens      = models.PositiveIntegerField(default=4096)
 

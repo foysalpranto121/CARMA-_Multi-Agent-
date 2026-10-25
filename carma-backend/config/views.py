@@ -81,10 +81,19 @@ def _llm_status() -> dict:
     A provider only counts as configured when a real credential is present —
     a copied ``.env.example`` must not be reported as a working LLM.
     """
+    anthropic_key = getattr(settings, 'ANTHROPIC_API_KEY', '') or ''
     api_key = getattr(settings, 'OPENAI_API_KEY', '') or ''
     ollama_url = getattr(settings, 'OLLAMA_BASE_URL', '') or ''
     has_key = not _is_placeholder(api_key)
 
+    if not _is_placeholder(anthropic_key):
+        return {
+            'configured': True,
+            'provider': 'anthropic',
+            'base_url': 'https://api.anthropic.com',
+            'api_key_present': True,
+            'reachable': None,
+        }
     if has_key:
         return {
             'configured': True,

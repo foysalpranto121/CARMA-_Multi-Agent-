@@ -365,6 +365,8 @@ FRONTEND_URL       = config('FRONTEND_URL', default='http://localhost:5173')
 # ── CARMA Engine Settings ──────────────────────────────────────
 QDRANT_URL     = config('QDRANT_URL',     default='http://localhost:6333')
 QDRANT_API_KEY = config('QDRANT_API_KEY', default='')
+ANTHROPIC_API_KEY = config('ANTHROPIC_API_KEY', default='')
+ANTHROPIC_EFFORT  = config('ANTHROPIC_EFFORT',  default='medium')
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
 OLLAMA_BASE_URL= config('OLLAMA_BASE_URL',default='http://localhost:11434')
 OPENAI_BASE_URL= config('OPENAI_BASE_URL',default='https://api.openai.com/v1')

@@ -51,6 +51,8 @@ data/*.xes
 data/*.xes.gz
 data/*.zip
 data/*.csv
+# partial downloads left behind by an interrupted fetch
+data/*.download
 
 # IDE
 .vscode/
