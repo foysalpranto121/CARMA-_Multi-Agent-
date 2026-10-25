@@ -26,7 +26,8 @@ EXPORT_COLUMNS = [
     'adaptation_id', 'run_id', 'config_code', 'seed', 'case_id', 'scenario',
     'status', 'task_success', 'viol_cost', 'exec_cost', 'total_cost',
     'conformance_fitness', 'latency_s', 'repair_rounds', 'scv_approved',
-    'llm_tokens',
+    'llm_tokens', 'hard_violation', 'unsafe_action', 'gold_exact_match',
+    'gold_similarity', 'plan_source', 'llm_backend', 'usd_cost',
 ]
 
 
@@ -74,6 +75,7 @@ class ExperimentRunViewSet(viewsets.ModelViewSet):
                 'retrieval': runner_class.retrieval_type,
                 'multi_agent': runner_class.multi_agent,
                 'use_scv': runner_class.use_scv,
+                'use_escalation': runner_class.use_escalation,
                 'num_agents': runner_class.num_agents,
             })
         return Response(rows)
@@ -177,6 +179,13 @@ class ExportResultsView(APIView):
                 adaptation.repair_rounds,
                 adaptation.scv_approved,
                 adaptation.llm_tokens,
+                adaptation.constraint_violated,
+                adaptation.unsafe_action,
+                adaptation.gold_exact_match,
+                adaptation.gold_similarity,
+                adaptation.plan_source,
+                adaptation.llm_backend,
+                adaptation.usd_cost,
             ])
 
         response = HttpResponse(output.getvalue(), content_type='text/csv')

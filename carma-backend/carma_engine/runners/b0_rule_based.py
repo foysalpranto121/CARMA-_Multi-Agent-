@@ -34,8 +34,9 @@ class B0RuleBasedRunner(BaseRunner):
     multi_agent = False
     use_scv = False
     num_agents = 0
+    uses_llm = False
 
-    def plan_case(self, benchmark_case, state, constraint_graph, evidence):
+    def plan_case(self, benchmark_case, state, constraint_graph, evidence, feedback=None):
         # The rule engine follows the process frame: it discharges the
         # obligations the executed prefix left open, in the order the frame
         # imposes, and adds the activities the model enables now.  It has no
@@ -78,13 +79,14 @@ class B0RuleBasedRunner(BaseRunner):
             'rationale': 'Rule-based ordering of the currently enabled activities.',
             'goal_reachable': goal_reachable,
         }
+        plan['plan_source'] = 'rule_based'
         return {
             'plan': plan,
             'plan_id': plan['plan_id'],
+            'plan_source': 'rule_based',
             'activity_seq': ordered,
             'confidence': confidence,
             'exec_cost': 0.1 * len(ordered),
-            'task_success': goal_reachable,
             'repair_rounds': 0,
             'escalate': not goal_reachable,
             'escalation_reason': '' if goal_reachable else 'No enabled activity available.',

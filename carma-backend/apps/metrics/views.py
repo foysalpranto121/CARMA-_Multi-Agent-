@@ -42,6 +42,9 @@ class StatisticalTestsView(APIView):
 
         adaptations = Adaptation.objects.select_related(
             'run__configuration', 'benchmark_case').all()
+        # A run on the test double measures the plumbing, never a model.
+        if request.query_params.get('include_mock') not in ('1', 'true'):
+            adaptations = adaptations.exclude(llm_backend='mock')
 
         run_id = request.query_params.get('run') or request.query_params.get('experiment')
         if run_id:
@@ -58,7 +61,7 @@ class StatisticalTestsView(APIView):
             rows.append({
                 'benchmark_case_id': case_id,
                 'config_code': config_code,
-                'constraint_violated': bool(adaptation.viol_cost and adaptation.viol_cost > 0),
+                'constraint_violated': adaptation.constraint_violated,
                 'task_success': adaptation.task_success,
                 'latency_s': adaptation.latency_s,
             })

@@ -2,23 +2,39 @@
 Base runner — the shared CARMA pipeline for one benchmark case.
 
     constraint graph → state estimation → retrieval → agent team
-                     → symbolic verification → cost/metric computation
+                     → symbolic verification (→ repair) → escalation gate
+                     → execution → scoring against the reference
 
 The runner is deterministic given ``(case, configuration)``: the only source
-of randomness is the LLM, and its sampling parameters (temperature, seed) come
-from the run configuration.
+of randomness is the LLM.
+
+A configuration switches on these components, and nothing else (the
+factorial design of the study):
+
+  * ``retrieval_type`` — none / vector / graph / constraint-aware (CAR)
+  * ``multi_agent``    — the four-role team instead of a single agent
+  * ``use_scv``        — the verifier *acts*: a rejected plan goes back to
+                         the planner with the violation report, at most
+                         ``k_repair_rounds`` times, and a plan that is still
+                         rejected does not run
+  * ``use_escalation`` — the confidence gate hands the case to a human (B7)
+
+The verifier also *scores* every adaptation, whatever the configuration, so
+that violation rates are comparable across configurations; scoring never
+changes what runs.  Violations are counted on what was executed: a plan that
+was blocked, declined or escalated put nothing into the process.
 """
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
-from ..agents.planner import summarize_evidence
 from ..constraint_knowledge.graph_builder import build_constraint_graph
 from ..escalation.gate import TAU_DEFAULT, should_escalate
 from ..llm.client import DEFAULT_MODEL, LLMUnavailable, build_llm
 from ..retriever.constraint_aware import ConstraintAwareRetriever, plain_vector_rag
+from ..scoring import score_adaptation
 from ..state_estimator.replay import estimate_state
 from ..verifier.symbolic import SCVVerifier
 
@@ -32,11 +48,19 @@ class RunOutcome:
     """The result of running one case under one configuration."""
     plan: dict = field(default_factory=dict)
     plan_id: str = ''
+    plan_source: str = ''
+    # what the agent proposed, and what actually ran
+    planned_seq: list = field(default_factory=list)
     activity_seq: list = field(default_factory=list)
     confidence: float | None = None
     exec_cost: float = 0.0
     viol_cost: float = 0.0
+    hard_violation: bool = False
+    unsafe_action: bool = False
     task_success: bool = False
+    goal_reached: bool = False
+    gold_exact_match: bool | None = None
+    gold_similarity: float | None = None
     conformance_fitness: float = 0.0
     repair_rounds: int = 0
     status: str = 'failed'
@@ -44,6 +68,9 @@ class RunOutcome:
     escalation_reason: str = ''
     tokens_used: int = 0
     llm_calls: int = 0
+    usd_cost: float | None = None
+    served_by: dict = field(default_factory=dict)
+    llm_backend: str = ''
     retrieved_docs: list = field(default_factory=list)
     retrieval_scores: dict = field(default_factory=dict)
     scv_approved: bool | None = None
@@ -52,28 +79,7 @@ class RunOutcome:
     error: str = ''
 
     def to_dict(self) -> dict:
-        return {
-            'plan': self.plan,
-            'plan_id': self.plan_id,
-            'activity_seq': self.activity_seq,
-            'confidence': self.confidence,
-            'exec_cost': self.exec_cost,
-            'viol_cost': self.viol_cost,
-            'task_success': self.task_success,
-            'conformance_fitness': self.conformance_fitness,
-            'repair_rounds': self.repair_rounds,
-            'status': self.status,
-            'needs_escalation': self.needs_escalation,
-            'escalation_reason': self.escalation_reason,
-            'tokens_used': self.tokens_used,
-            'llm_calls': self.llm_calls,
-            'retrieved_docs': self.retrieved_docs,
-            'retrieval_scores': self.retrieval_scores,
-            'scv_approved': self.scv_approved,
-            'scv_token': self.scv_token,
-            'violation_report': self.violation_report,
-            'error': self.error,
-        }
+        return asdict(self)
 
 
 def _executed_prefix(benchmark_case) -> list:
@@ -89,6 +95,19 @@ def _executed_prefix(benchmark_case) -> list:
     return benchmark_case.case.prefix_trace or []
 
 
+def _usage_snapshot(llm) -> dict:
+    """The cumulative usage counters of an LLM client (a runner reuses its client)."""
+    usage = getattr(llm, 'usage', None)
+    if usage is None:
+        return {'tokens': 0, 'calls': 0, 'usd': 0.0, 'served_by': {}}
+    return {
+        'tokens': usage.total_tokens,
+        'calls': usage.calls,
+        'usd': float(getattr(usage, 'usd_cost', 0.0) or 0.0),
+        'served_by': dict(getattr(usage, 'served_by', {}) or {}),
+    }
+
+
 class BaseRunner:
     """
     Shared implementation of one experiment configuration.
@@ -96,15 +115,19 @@ class BaseRunner:
     :param code:           configuration code (``B0`` .. ``B7``)
     :param retrieval_type: ``none`` | ``vector`` | ``graph`` | ``constraint_aware``
     :param multi_agent:    use the 4-role agent team instead of a single agent
-    :param use_scv:        run the symbolic constraint verifier
+    :param use_scv:        the symbolic constraint verifier gates execution
+    :param use_escalation: the confidence gate may hand the case to a human
     :param num_agents:     number of specialist agents
+    :param uses_llm:       the configuration needs a model endpoint
     """
 
     code = 'B0'
     retrieval_type = 'none'
     multi_agent = False
     use_scv = False
+    use_escalation = False
     num_agents = 1
+    uses_llm = True
 
     def __init__(self, config=None, llm=None, seed=None):
         self.config = config
@@ -120,6 +143,18 @@ class BaseRunner:
             self._llm = build_llm(model=model, temperature=temperature,
                                   max_tokens=max_tokens, seed=self.seed)
         return self._llm
+
+    def check_llm(self):
+        """
+        Fail fast when the configuration needs a model that cannot be reached.
+
+        :raises LLMUnavailable: naming the missing setting
+        """
+        if not self.uses_llm:
+            return
+        require = getattr(self.llm(), '_require', None)
+        if require is not None:
+            require()
 
     def tau(self) -> float:
         """Confidence threshold for human escalation."""
@@ -219,8 +254,13 @@ class BaseRunner:
         count = max(1, int(getattr(self.config, 'num_agents', 4) or 4))
         return list(AGENT_ROLES[:count])
 
-    def plan_case(self, benchmark_case, state, constraint_graph, evidence):
-        """Produce the adaptation plan (overridden by the rule-based runner)."""
+    def plan_case(self, benchmark_case, state, constraint_graph, evidence, feedback=None):
+        """
+        Produce the adaptation plan (overridden by the rule-based runner).
+
+        :param feedback: the verifier's report on the previous plan, for an
+                         SCV repair round
+        """
         from ..agents.graph import build_agent_graph  # noqa: PLC0415
 
         llm = self.llm()
@@ -230,6 +270,7 @@ class BaseRunner:
             tau=self.tau(),
             agent_roles=self.agent_roles(),
             repair_rounds=self.repair_rounds(),
+            multi_agent=self.multi_agent,
         )
         initial_state = {
             'perturbation': benchmark_case.perturbation or {},
@@ -238,7 +279,7 @@ class BaseRunner:
             'evidence': evidence,
             'constraint_graph_data': {},
             'plan': None,
-            'violation_report': None,
+            'violation_report': feedback,
             'scv_passed': False,
             'repair_round': 0,
             'escalate': False,
@@ -252,8 +293,10 @@ class BaseRunner:
         }
         try:
             final_state = graph.invoke(initial_state)
+        except LLMUnavailable:
+            raise
         except Exception as exc:
-            log.warning('Agent graph failed (%s) — falling back to heuristic plan.', exc)
+            log.warning('Agent graph failed (%s) — no plan for this case.', exc)
             final_state = initial_state
 
         plan = final_state.get('plan') or {}
@@ -263,10 +306,10 @@ class BaseRunner:
         return {
             'plan': plan,
             'plan_id': plan.get('plan_id', ''),
+            'plan_source': plan.get('plan_source', ''),
             'activity_seq': executor.get('activity_seq') or [],
             'confidence': critic.get('confidence', plan.get('confidence')),
             'exec_cost': executor.get('exec_cost', 0.0),
-            'task_success': bool(executor.get('task_success')),
             'repair_rounds': int(final_state.get('repair_round', 0) or 0),
             'escalate': bool(final_state.get('escalate')),
             'escalation_reason': final_state.get('escalation_reason', ''),
@@ -277,12 +320,6 @@ class BaseRunner:
     def verify(self, benchmark_case, plan, constraint_graph, state, agent_intents=None):
         """
         Run the symbolic constraint verifier.
-
-        The verifier is the *yardstick* of the study: it scores every
-        adaptation, whatever the configuration is, so that the violation
-        rate of two configurations can be compared.  Whether the verdict
-        is also *acted upon* — the plan is blocked, repaired or escalated
-        — is what the ``use_scv`` switch of a configuration decides.
 
         :returns: ``(passed, token, violation_cost, report)``
         """
@@ -305,6 +342,7 @@ class BaseRunner:
         """
         outcome = RunOutcome()
         started = time.monotonic()
+        before = _usage_snapshot(self._llm)
 
         try:
             constraint_graph = self.build_graph(benchmark_case)
@@ -322,58 +360,90 @@ class BaseRunner:
             outcome.retrieval_scores = scores
 
             agent_result = self.plan_case(benchmark_case, state, constraint_graph, evidence)
-            outcome.plan = agent_result.get('plan') or {}
+            planned = list(agent_result.get('activity_seq') or [])
+            passed, token, viol_cost, report = None, '', 0.0, {}
+            scv_repairs = 0
+            if planned:
+                passed, token, viol_cost, report = self.verify(
+                    benchmark_case, agent_result.get('plan') or {}, constraint_graph, state,
+                    agent_intents=agent_result.get('agent_intents'))
+            if self.use_scv:
+                # The action-side constraint layer: the verifier's report goes
+                # back to the planner, at most k times.
+                while planned and not passed and scv_repairs < self.repair_rounds():
+                    scv_repairs += 1
+                    agent_result = self.plan_case(benchmark_case, state, constraint_graph,
+                                                  evidence, feedback=report)
+                    planned = list(agent_result.get('activity_seq') or [])
+                    if not planned:
+                        passed, token, viol_cost, report = None, '', 0.0, {}
+                        break
+                    passed, token, viol_cost, report = self.verify(
+                        benchmark_case, agent_result.get('plan') or {}, constraint_graph,
+                        state, agent_intents=agent_result.get('agent_intents'))
+
+            plan = agent_result.get('plan') or {}
+            outcome.plan = plan
             outcome.plan_id = agent_result.get('plan_id', '')
-            outcome.activity_seq = agent_result.get('activity_seq') or []
+            outcome.plan_source = agent_result.get('plan_source', '')
+            outcome.planned_seq = planned
             outcome.confidence = agent_result.get('confidence')
-            outcome.exec_cost = float(agent_result.get('exec_cost') or 0.0)
-            outcome.repair_rounds = int(agent_result.get('repair_rounds') or 0)
+            outcome.repair_rounds = int(agent_result.get('repair_rounds') or 0) + scv_repairs
             outcome.llm_calls = int(agent_result.get('llm_calls') or 0)
-
-            passed, token, viol_cost, report = self.verify(
-                benchmark_case, outcome.plan, constraint_graph, state,
-                agent_intents=agent_result.get('agent_intents'))
             outcome.scv_approved = passed
-            outcome.scv_token = token
-            outcome.viol_cost = viol_cost
             outcome.violation_report = report
-            if self.use_scv and not passed:
-                # The pre-execution verifier is part of the agent's loop
-                # in this configuration: a plan that violates the frame is
-                # not executed.
-                outcome.activity_seq = []
-                outcome.task_success = False
 
-            outcome.conformance_fitness = _conformance_fitness(
-                outcome.viol_cost, constraint_graph)
-            if outcome.task_success is False and outcome.scv_approved is not False:
-                outcome.task_success = bool(outcome.activity_seq)
-
-            escalate, reason = should_escalate(
-                outcome.plan,
-                verdict={'violation_report': outcome.violation_report} if outcome.violation_report else None,
-                constraint_graph=constraint_graph,
-                tau=self.tau(),
-                repair_rounds=outcome.repair_rounds,
-                max_repair_rounds=self.repair_rounds(),
-                escalate_flag=agent_result.get('escalate', False),
-            )
+            escalate, reason = False, ''
+            if self.use_escalation:
+                escalate, reason = should_escalate(
+                    plan,
+                    verdict={'violation_report': report} if report else None,
+                    constraint_graph=constraint_graph,
+                    tau=self.tau(),
+                    escalate_flag=agent_result.get('escalate', False),
+                )
+                reason = reason or agent_result.get('escalation_reason', '')
             outcome.needs_escalation = escalate
-            outcome.escalation_reason = reason or agent_result.get('escalation_reason', '')
+            outcome.escalation_reason = reason
 
             if escalate:
                 outcome.status = 'escalated'
-            elif outcome.viol_cost > 0:
-                outcome.status = 'violation'
-            elif outcome.repair_rounds:
-                outcome.status = 'repair'
+            elif not planned and outcome.plan_source in ('unparseable', 'error'):
+                # The model produced no plan at all.  That is a failure, not
+                # a decision to leave the case to a human.
+                outcome.status = 'failed'
+                outcome.error = f'The model returned no usable plan ({outcome.plan_source}).'
+            elif not planned:
+                outcome.status = 'declined'
+            elif self.use_scv and not passed:
+                outcome.status = 'blocked'
             else:
-                outcome.status = 'success'
+                # Least privilege: with the SCV on, the plan runs on its token.
+                outcome.activity_seq = planned
+                outcome.scv_token = token if self.use_scv else ''
+                outcome.exec_cost = float(agent_result.get('exec_cost') or 0.0)
+                outcome.viol_cost = float(viol_cost or 0.0)
+                hard = [v for v in (report or {}).get('violations') or []
+                        if v.get('severity', 'hard') == 'hard']
+                outcome.hard_violation = bool(hard)
+                outcome.unsafe_action = bool(hard) and any(
+                    activity.get('is_write') for activity in plan.get('activities') or [])
+                if outcome.viol_cost > 0:
+                    outcome.status = 'violation'
+                elif outcome.repair_rounds:
+                    outcome.status = 'repair'
+                else:
+                    outcome.status = 'success'
 
-            llm = self._llm
-            if llm is not None:
-                outcome.tokens_used = llm.usage.total_tokens
-                outcome.llm_calls = max(outcome.llm_calls, llm.usage.calls)
+            outcome.conformance_fitness = _conformance_fitness(
+                outcome.viol_cost, constraint_graph)
+            score = score_adaptation(
+                benchmark_case.gold_adaptation, benchmark_case.gold_activity_seq,
+                outcome.activity_seq, outcome.status, outcome.hard_violation)
+            outcome.goal_reached = score.goal_reached
+            outcome.task_success = score.task_success
+            outcome.gold_exact_match = score.exact_match
+            outcome.gold_similarity = score.similarity
 
         except LLMUnavailable as exc:
             outcome.status = 'failed'
@@ -384,9 +454,29 @@ class BaseRunner:
             outcome.error = str(exc)
             log.exception('Runner %s failed: %s', self.code, exc)
 
+        self._record_usage(outcome, before)
         outcome_dict = outcome.to_dict()
         outcome_dict['latency_s'] = time.monotonic() - started
         return outcome_dict
+
+    def _record_usage(self, outcome: RunOutcome, before: dict):
+        """Attribute the LLM usage of this case (the delta since it started)."""
+        llm = self._llm
+        if llm is None:
+            outcome.llm_backend = 'rule_based' if not self.uses_llm else ''
+            outcome.usd_cost = 0.0 if not self.uses_llm else None
+            return
+        after = _usage_snapshot(llm)
+        outcome.tokens_used = after['tokens'] - before['tokens']
+        outcome.llm_calls = max(outcome.llm_calls, after['calls'] - before['calls'])
+        outcome.served_by = {
+            model: count - before['served_by'].get(model, 0)
+            for model, count in after['served_by'].items()
+            if count - before['served_by'].get(model, 0) > 0
+        }
+        outcome.llm_backend = getattr(llm, 'provider', '') or ''
+        if outcome.llm_backend in ('anthropic', 'mock'):
+            outcome.usd_cost = round(after['usd'] - before['usd'], 6)
 
 
 # ── helpers ───────────────────────────────────────────────────

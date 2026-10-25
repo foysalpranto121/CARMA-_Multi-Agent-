@@ -92,6 +92,54 @@ def experiment_run(run_configuration, process, constraint_set):
         constraint_set=constraint_set, seed=42, status='pending')
 
 
+@pytest.fixture
+def mock_llm(monkeypatch):
+    """Runners built by the pipeline get the deterministic test double."""
+    from carma_engine.llm.mock import MockLLM
+
+    monkeypatch.setattr('carma_engine.runners.base.build_llm', lambda **kwargs: MockLLM())
+
+
+@pytest.fixture
+def no_credentials(monkeypatch):
+    """No model credential, whatever carma-backend/.env holds."""
+    monkeypatch.setenv('ANTHROPIC_API_KEY', '')
+    monkeypatch.setenv('OPENAI_API_KEY', '')
+
+
+class ScriptedLLM:
+    """A test double that always proposes the same plan and approves it."""
+
+    provider = 'mock'
+    model = 'scripted'
+
+    def __init__(self, activities):
+        from carma_engine.llm.client import Usage
+
+        self.activities = activities
+        self.usage = Usage()
+
+    def available(self):
+        return True
+
+    def invoke_json(self, system_prompt, human_prompt, default=None):
+        self.usage.calls += 1
+        if 'critic' in system_prompt.lower():
+            return {'approved': True, 'goal_reachable': True, 'confidence': 0.9, 'issues': []}
+        if 'planner' in system_prompt.lower():
+            if self.activities is None:
+                return {}
+            return {
+                'plan_id': 'scripted-plan',
+                'activities': [{'activity_name': name, 'role': 'officer',
+                                'data_payload': {}, 'is_write': False}
+                               for name in self.activities],
+                'evidence_ids': [], 'confidence': 0.9,
+                'rationale': 'scripted', 'goal_reachable': bool(self.activities),
+            }
+        return {'summary': 'framing', 'intents': [], 'conflicts': []}
+
+
 class TestRunners:
     def test_matrix_covers_b0_to_b7(self):
         from carma_engine.runners import RUNNER_MATRIX
@@ -116,15 +164,29 @@ class TestRunners:
         assert output['llm_calls'] == 0
 
     def test_b7_runs_end_to_end(self, benchmark_case, run_configuration, corpus):
+        from carma_engine.llm.mock import MockLLM
         from carma_engine.runners import get_runner
 
-        runner = get_runner('B7', config=run_configuration, seed=42)
+        runner = get_runner('B7', config=run_configuration, seed=42, llm=MockLLM())
         output = runner.run(benchmark_case, run_configuration)
         assert output['error'] == ''
         assert 'plan' in output
         assert 'activity_seq' in output
+        assert output['llm_backend'] == 'mock'
         assert output['conformance_fitness'] is not None
         assert 0.0 <= output['conformance_fitness'] <= 1.0
+
+    def test_llm_configuration_without_credentials_fails_loudly(
+            self, benchmark_case, run_configuration, no_credentials):
+        """No key must never turn into a rule-based plan recorded under B7."""
+        from carma_engine.runners import get_runner
+
+        output = get_runner('B7', config=run_configuration, seed=42).run(
+            benchmark_case, run_configuration)
+        assert output['status'] == 'failed'
+        assert 'OPENAI_API_KEY' in output['error']
+        assert output['activity_seq'] == []
+        assert output['task_success'] is False
 
 
 class TestStateEstimator:
@@ -181,7 +243,7 @@ class TestVerifier:
 
 class TestExperimentPipeline:
     def test_run_case_persists_adaptation_and_audit(self, benchmark_case,
-                                                     experiment_run):
+                                                     experiment_run, mock_llm):
         from apps.audit.models import AuditLogEntry
         from apps.experiments.tasks import run_case
 
@@ -190,7 +252,9 @@ class TestExperimentPipeline:
 
         adaptation = Adaptation.objects.get(id=outcome['adaptation_id'])
         assert adaptation.run_id == experiment_run.id
-        assert adaptation.status in ('success', 'violation', 'escalated', 'repair')
+        assert adaptation.status in ('success', 'violation', 'escalated', 'repair',
+                                     'blocked', 'declined')
+        assert adaptation.llm_backend == 'mock'
 
         entries = AuditLogEntry.objects.filter(adaptation_id=adaptation.id)
         assert entries.count() >= 3
@@ -198,7 +262,7 @@ class TestExperimentPipeline:
         assert is_valid is True, f'chain broken at {broken_at}'
 
     def test_aggregate_creates_run_result_and_metrics(self, benchmark_case,
-                                                       experiment_run):
+                                                       experiment_run, mock_llm):
         from apps.experiments.tasks import aggregate_results, run_case
 
         run_case(str(experiment_run.id), str(benchmark_case.id))
@@ -207,7 +271,7 @@ class TestExperimentPipeline:
         result = RunResult.objects.get(run=experiment_run)
         assert result.constraint_viol_rate is not None
         assert 0.0 <= result.constraint_viol_rate <= 1.0
-        assert result.total_llm_tokens == 0
+        assert result.total_llm_tokens > 0
 
         from apps.metrics.models import RunMetrics
         assert RunMetrics.objects.filter(run=experiment_run).exists()
@@ -235,6 +299,13 @@ class TestSeedCommand:
         assert b0.use_car is False
         assert b0.use_scv is False
         assert b0.multi_agent is False
+
+        # B6 is the action-side cell of the 2x2: vector retrieval plus the SCV.
+        b6 = RunConfiguration.objects.get(code='B6')
+        assert b6.use_car is False
+        assert b6.use_scv is True
+        assert 'VectorRAG' in b6.name
+        assert b7.llm_model == 'claude-opus-5-5'
 
         # idempotent
         call_command('seed_configurations', stdout=StringIO())
@@ -293,3 +364,257 @@ class TestSystemStatus:
 
         response = APIClient().get('/api/v1/system/status/')
         assert response.status_code in (401, 403)
+
+
+class TestScoring:
+    """Task success and adaptation correctness against the gold (Section VI-C)."""
+
+    def test_reached_goal_with_exact_sequence(self):
+        from carma_engine.scoring import score_adaptation
+
+        score = score_adaptation({'strategy': 'follow_observed_path'},
+                                 ['a', 'b'], ['a', 'b'], 'success', False)
+        assert score.task_success is True
+        assert score.exact_match is True
+        assert score.similarity == 1.0
+
+    def test_partial_match(self):
+        from carma_engine.scoring import score_adaptation
+
+        score = score_adaptation({'strategy': 'follow_observed_path'},
+                                 ['a', 'b', 'c'], ['a', 'c'], 'success', False)
+        assert score.goal_reached is True
+        assert score.exact_match is False
+        assert score.partial_match is True
+        assert score.similarity == 0.8
+
+    def test_hard_violation_is_not_a_success(self):
+        from carma_engine.scoring import score_adaptation
+
+        score = score_adaptation({'strategy': 'follow_observed_path'},
+                                 ['a'], ['a'], 'violation', True)
+        assert score.goal_reached is True
+        assert score.task_success is False
+
+    def test_a_non_empty_plan_is_not_automatically_a_success(self):
+        from carma_engine.scoring import score_adaptation
+
+        score = score_adaptation({'strategy': 'follow_observed_path'},
+                                 ['approve'], ['reject'], 'success', False)
+        assert score.task_success is False
+
+    def test_human_strategies_need_the_case_left_to_a_human(self):
+        from carma_engine.scoring import score_adaptation
+
+        gold = {'strategy': 'request_clarification'}
+        assert score_adaptation(gold, [], [], 'escalated', False).task_success is True
+        assert score_adaptation(gold, [], [], 'declined', False).task_success is True
+        assert score_adaptation(gold, [], [], 'blocked', False).task_success is False
+        assert score_adaptation(gold, [], [], 'failed', False).task_success is False
+        assert score_adaptation(gold, [], ['a'], 'success', False).task_success is False
+
+
+class TestPlannerIntegrity:
+    """A model's answer is never replaced by a heuristic plan."""
+
+    @staticmethod
+    def _plan(llm):
+        from carma_engine.agents.planner import planner_node
+
+        state = {'process_state': {'enabled_activities': ['approve_loan']},
+                 'evidence': [], 'prefix_trace': PREFIX, 'perturbation': {}}
+        return planner_node(llm)(state)['plan']
+
+    def test_a_decline_is_kept(self):
+        plan = self._plan(ScriptedLLM([]))
+        assert plan['plan_source'] == 'llm'
+        assert plan['activities'] == []
+
+    def test_unparseable_output_is_not_replaced_by_a_heuristic(self):
+        plan = self._plan(ScriptedLLM(None))
+        assert plan['plan_source'] == 'unparseable'
+        assert plan['activities'] == []
+
+    def test_an_unreachable_model_propagates(self, no_credentials):
+        from carma_engine.llm.client import LLMClient, LLMUnavailable
+
+        with pytest.raises(LLMUnavailable):
+            self._plan(LLMClient(model='claude-opus-5-5'))
+
+
+class TestFactorialGating:
+    """B4, B6 and B7 differ only in what the verifier and the gate may do."""
+
+    @pytest.fixture
+    def scored_case(self, benchmark_case):
+        benchmark_case.gold_adaptation = {'strategy': 'follow_observed_path'}
+        benchmark_case.gold_activity_seq = ['approve_loan']
+        benchmark_case.save()
+        return benchmark_case
+
+    @staticmethod
+    def _run(code, case, activities):
+        from carma_engine.runners import get_runner
+
+        config = RunConfiguration.objects.create(
+            code=code, name=code, llm_model='claude-opus-5-5', k_repair_rounds=2)
+        return get_runner(code, config=config, seed=42,
+                          llm=ScriptedLLM(activities)).run(case, config)
+
+    def test_without_the_scv_a_violating_plan_runs(self, scored_case):
+        output = self._run('B4', scored_case, ['reject_loan'])
+        assert output['status'] == 'violation'
+        assert output['activity_seq'] == ['reject_loan']
+        assert output['hard_violation'] is True
+        assert output['task_success'] is False
+        assert output['needs_escalation'] is False
+
+    def test_the_scv_repairs_then_blocks_a_violating_plan(self, scored_case):
+        output = self._run('B6', scored_case, ['reject_loan'])
+        assert output['status'] == 'blocked'
+        assert output['planned_seq'] == ['reject_loan']
+        assert output['activity_seq'] == []
+        assert output['hard_violation'] is False
+        assert output['repair_rounds'] == 2
+        assert output['needs_escalation'] is False
+
+    def test_carma_escalates_a_violating_plan(self, scored_case):
+        output = self._run('B7', scored_case, ['reject_loan'])
+        assert output['status'] == 'escalated'
+        assert output['activity_seq'] == []
+        assert output['needs_escalation'] is True
+
+    def test_a_compliant_plan_succeeds_against_the_gold(self, scored_case):
+        for code in ('B4', 'B6', 'B7'):
+            output = self._run(code, scored_case, ['approve_loan'])
+            assert output['status'] == 'success', (code, output['escalation_reason'])
+            assert output['task_success'] is True
+            assert output['gold_exact_match'] is True
+
+    def test_single_agent_makes_one_call(self, scored_case):
+        output = self._run('B1', scored_case, ['approve_loan'])
+        assert output['llm_calls'] == 1
+
+
+class TestClaudeClient:
+    @staticmethod
+    def _client(monkeypatch, captured, model='claude-opus-5-5', stop_reason='end_turn',
+                served=None, iterations=None):
+        from types import SimpleNamespace
+
+        from carma_engine.llm.client import LLMClient
+
+        monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-ant-test-key')
+        monkeypatch.setenv('ANTHROPIC_EFFORT', 'medium')
+        client = LLMClient(model=model, temperature=0.2, seed=7)
+
+        def create(**params):
+            captured.update(params)
+            return SimpleNamespace(
+                stop_reason=stop_reason, stop_details=None, model=served or model,
+                content=[SimpleNamespace(type='thinking', thinking=''),
+                         SimpleNamespace(type='text', text='{"ok": true}')],
+                usage=SimpleNamespace(input_tokens=1000, output_tokens=500,
+                                      iterations=iterations))
+
+        client._anthropic = SimpleNamespace(
+            beta=SimpleNamespace(messages=SimpleNamespace(create=create)))
+        return client
+
+    def test_request_sends_no_sampling_parameters(self, monkeypatch):
+        captured = {}
+        client = self._client(monkeypatch, captured)
+        assert client.invoke_json('system', 'human') == {'ok': True}
+        assert captured['model'] == 'claude-opus-5-5'
+        assert captured['system'] == 'system'
+        assert 'temperature' not in captured
+        assert 'seed' not in captured
+        assert captured['max_tokens'] >= 16000
+        assert captured['output_config'] == {'effort': 'medium'}
+        assert captured['fallbacks'] == 'default'
+        assert captured['betas'] == ['server-side-fallback-2026-07-01']
+
+    def test_usage_records_cost_and_the_serving_model(self, monkeypatch):
+        from types import SimpleNamespace
+
+        captured = {}
+        client = self._client(
+            monkeypatch, captured, served='claude-opus-5',
+            iterations=[SimpleNamespace(type='message'),
+                        SimpleNamespace(type='fallback_message')])
+        client.invoke('s', 'h')
+        assert client.usage.calls == 1
+        assert client.usage.served_by == {'claude-opus-5': 1}
+        assert client.usage.fallbacks == 1
+        assert client.usage.usd_cost == pytest.approx((1000 * 5 + 500 * 25) / 1e6)
+
+    def test_haiku_sends_no_fallback(self, monkeypatch):
+        captured = {}
+        self._client(monkeypatch, captured, model='claude-haiku-5-5').invoke('s', 'h')
+        assert 'fallbacks' not in captured
+        assert 'betas' not in captured
+
+    def test_a_refusal_returns_no_text(self, monkeypatch):
+        captured = {}
+        client = self._client(monkeypatch, captured, stop_reason='refusal')
+        assert client.invoke('s', 'h') == ''
+        assert client.usage.refusals == 1
+
+    def test_the_key_comes_from_the_environment_or_env_file(self, monkeypatch, no_credentials):
+        from carma_engine.llm.client import LLMClient
+
+        assert LLMClient(model='claude-opus-5-5').available() is False
+        monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-ant-real-key')
+        assert LLMClient(model='claude-opus-5-5').available() is True
+
+    def test_ollama_receives_its_own_model_tag(self, monkeypatch):
+        import io
+        import json
+
+        from carma_engine.llm.client import LLMClient
+
+        sent = {}
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(request, timeout=None):
+            sent.update(json.loads(request.data))
+            return Response(json.dumps({'message': {'content': 'hi'}}).encode())
+
+        monkeypatch.setattr('urllib.request.urlopen', urlopen)
+        assert LLMClient(model='qwen2.5-32b').invoke('s', 'h') == 'hi'
+        assert sent['model'] == 'qwen2.5:32b'
+
+
+class TestRunExperimentCommand:
+    def test_stops_before_the_first_case_without_credentials(self, benchmark_case,
+                                                             no_credentials):
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        call_command('seed_configurations', stdout=StringIO())
+        with pytest.raises(CommandError, match='ANTHROPIC_API_KEY'):
+            call_command('run_experiment', '--configs', 'B7',
+                         stdout=StringIO(), stderr=StringIO())
+        assert not Adaptation.objects.exists()
+
+    def test_records_the_audit_chain_like_the_celery_path(self, benchmark_case):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from apps.audit.models import AuditLogEntry
+
+        call_command('seed_configurations', stdout=StringIO())
+        call_command('run_experiment', '--configs', 'B7', '--mock-llm',
+                     stdout=StringIO(), stderr=StringIO())
+        adaptation = Adaptation.objects.get()
+        assert adaptation.llm_backend == 'mock'
+        assert AuditLogEntry.objects.filter(adaptation_id=adaptation.id).count() >= 3

@@ -81,6 +81,7 @@ class BGEEmbedder:
             api_key=qdrant_api_key or settings.QDRANT_API_KEY or None,
         )
         self.dimension = self.model.get_sentence_embedding_dimension()
+        self._corpus_cache: dict[str, list] = {}
         self._ensure_collection()
 
     def _ensure_collection(self):
@@ -104,15 +105,73 @@ class BGEEmbedder:
             points=[PointStruct(id=point_id, vector=self.embed(text), payload=payload)],
         )
 
-    def search(self, query: str, limit: int = 50) -> list[dict]:
+    def index_documents(self, documents, batch_size: int = 64) -> int:
+        """Embed ``processes.CorpusDocument`` rows and upsert them into the index."""
+        from qdrant_client.models import PointStruct  # noqa: PLC0415
+
+        documents = list(documents)
+        for start in range(0, len(documents), batch_size):
+            batch = documents[start:start + batch_size]
+            payloads = [document_to_payload(document) for document in batch]
+            vectors = self.model.encode(
+                [f"{payload['title']}\n{payload['content']}" for payload in payloads],
+                normalize_embeddings=True, batch_size=32)
+            self.qdrant.upsert(self.collection, points=[
+                PointStruct(id=_point_id(payload['doc_id']), vector=vector.tolist(),
+                            payload=payload)
+                for payload, vector in zip(payloads, vectors)
+            ])
+        return len(documents)
+
+    def corpus(self, process_id: str | None = None) -> list[dict]:
+        """
+        Every indexed document of a process, with its stored vector.
+
+        Cached per process: the corpus is fixed while experiments run
+        (restart the workers after ``index_corpus``).
+        """
+        key = str(process_id or '')
+        if key not in self._corpus_cache:
+            points, offset = [], None
+            while True:
+                batch, offset = self.qdrant.scroll(
+                    self.collection, scroll_filter=_process_filter(process_id),
+                    with_payload=True, with_vectors=True, limit=256, offset=offset)
+                points.extend(batch)
+                if offset is None:
+                    break
+            self._corpus_cache[key] = [
+                {'id': (p.payload or {}).get('doc_id', str(p.id)),
+                 'payload': p.payload or {}, 'embedding': list(p.vector or [])}
+                for p in points
+            ]
+        return self._corpus_cache[key]
+
+    def count(self, process_id: str | None = None) -> int:
+        return self.qdrant.count(self.collection, count_filter=_process_filter(process_id),
+                                 exact=True).count
+
+    def search(self, query: str, limit: int = 50, process_id: str | None = None) -> list[dict]:
+        """Dense top-``limit`` documents, with their stored vectors."""
         results = self.qdrant.query_points(
             collection_name=self.collection,
             query=self.embed(query),
+            query_filter=_process_filter(process_id),
             limit=limit,
             with_payload=True,
+            with_vectors=True,
         ).points
-        return [{'id': str(p.id), 'score': float(p.score), 'payload': p.payload or {}}
+        return [{'id': (p.payload or {}).get('doc_id', str(p.id)), 'score': float(p.score),
+                 'payload': p.payload or {}, 'embedding': list(p.vector or [])}
                 for p in results]
+
+
+def _process_filter(process_id: str | None):
+    if not process_id:
+        return None
+    from qdrant_client.models import FieldCondition, Filter, MatchValue  # noqa: PLC0415
+
+    return Filter(must=[FieldCondition(key='process_id', match=MatchValue(value=str(process_id)))])
 
 
 def _point_id(doc_id: str) -> str:

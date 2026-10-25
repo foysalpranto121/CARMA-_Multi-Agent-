@@ -297,7 +297,10 @@ class Command(BaseCommand):
                 'run_id', 'config_code', 'seed', 'case_id', 'process', 'scenario',
                 'status', 'viol_cost', 'exec_cost', 'task_success',
                 'conformance_fitness', 'repair_rounds', 'escalated',
-                'latency_s', 'llm_tokens', 'plan_activities'])
+                'latency_s', 'llm_tokens', 'plan_activities',
+                'hard_violation', 'unsafe_action', 'gold_exact_match',
+                'gold_similarity', 'planned_activities', 'plan_source',
+                'llm_backend', 'served_by', 'usd_cost'])
             for adaptation in Adaptation.objects.select_related(
                     'run__configuration', 'benchmark_case__case',
                     'benchmark_case__scenario', 'benchmark_case__process'):
@@ -318,6 +321,15 @@ class Command(BaseCommand):
                     adaptation.latency_s,
                     adaptation.llm_tokens,
                     '|'.join(adaptation.activity_seq or []),
+                    adaptation.constraint_violated,
+                    adaptation.unsafe_action,
+                    adaptation.gold_exact_match,
+                    adaptation.gold_similarity,
+                    '|'.join(adaptation.planned_seq or []),
+                    adaptation.plan_source,
+                    adaptation.llm_backend,
+                    json.dumps(adaptation.served_by or {}, sort_keys=True),
+                    adaptation.usd_cost,
                 ])
         written.append(path)
         return written

@@ -13,6 +13,16 @@ from django.core.management.utils import get_random_secret_key
 # ── Paths ──────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# A shell can export SSL_CERT_FILE pointing at a CA bundle that does not
+# exist (a stale conda activation does).  Every HTTPS client — the Claude
+# SDK, Qdrant — then fails to start, so the broken setting is dropped and
+# the clients fall back to their bundled certificates.
+_ca_bundle = os.environ.get('SSL_CERT_FILE')
+if _ca_bundle and not os.path.exists(_ca_bundle):
+    warnings.warn(f'Ignoring SSL_CERT_FILE={_ca_bundle!r}: the file does not exist.',
+                  RuntimeWarning)
+    del os.environ['SSL_CERT_FILE']
+
 # ── Security ───────────────────────────────────────────────────
 # No secret is committed to the repository.  When SECRET_KEY is absent a random
 # key is generated for this process, which is fine for development but invalidates

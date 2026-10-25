@@ -7,4 +7,5 @@ class B7CARMARunner(BaseRunner):
     retrieval_type = 'constraint_aware'
     multi_agent = True
     use_scv = True
+    use_escalation = True
     num_agents = 4

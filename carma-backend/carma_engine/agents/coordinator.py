@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 
+from ..llm.client import LLMUnavailable
+
 log = logging.getLogger('carma')
 
 MAX_AGENT_ROUNDS = 3
@@ -75,6 +77,8 @@ def coordinator_node(llm, agent_roles: list[str] | None = None):
                 conflicts = raw.get('conflicts') or []
                 summary = raw.get('summary', '')
                 state['llm_calls'] = state.get('llm_calls', 0) + 1
+            except LLMUnavailable:
+                raise
             except Exception as exc:
                 log.warning('Coordinator LLM call failed (%s) — using heuristic framing.', exc)
         else:

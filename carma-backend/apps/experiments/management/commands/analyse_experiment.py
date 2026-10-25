@@ -54,6 +54,8 @@ class Command(BaseCommand):
                             help='Directory the report is written to.')
         parser.add_argument('--seed', type=int, default=42,
                             help='Seed of the bootstrap resampling.')
+        parser.add_argument('--include-mock', action='store_true',
+                            help='Also analyse adaptations made with the test double.')
 
     def handle(self, *args, **options):
         runs = self._runs(options['runs'])
@@ -62,16 +64,23 @@ class Command(BaseCommand):
 
         rows = []
         for run in runs:
-            for adaptation in Adaptation.objects.filter(run=run).select_related(
-                    'benchmark_case'):
+            adaptations = Adaptation.objects.filter(run=run).select_related('benchmark_case')
+            # A run on the test double measures the plumbing, never a model.
+            if not options['include_mock']:
+                adaptations = adaptations.exclude(llm_backend='mock')
+            for adaptation in adaptations:
                 rows.append({
                     'run_id': str(run.id),
                     'config_code': run.configuration.code,
                     'seed': run.seed,
                     'benchmark_case_id': str(adaptation.benchmark_case_id),
                     'scenario': adaptation.benchmark_case.scenario.code,
-                    'constraint_violated': adaptation.viol_cost > 0,
+                    'constraint_violated': adaptation.constraint_violated,
                     'task_succeeded': adaptation.task_success,
+                    'gold_exact_match': adaptation.gold_exact_match,
+                    'gold_similarity': adaptation.gold_similarity,
+                    'unsafe_action': adaptation.unsafe_action,
+                    'usd_cost': adaptation.usd_cost,
                     'escalated': adaptation.status == 'escalated',
                     'repaired': adaptation.repair_rounds > 0,
                     'viol_cost': adaptation.viol_cost,

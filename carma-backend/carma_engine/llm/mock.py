@@ -73,10 +73,12 @@ class MockLLM:
         self.usage.calls += 1
         self.usage.prompt_tokens += max(1, len(system_prompt + human_prompt) // 4)
 
-        if 'plan' in (system_prompt or '').lower():
-            payload = self._plan(human_prompt)
-        elif 'critic' in (system_prompt or '').lower():
+        # The critic's prompt also mentions the plan it reviews, so the
+        # critic is recognised first.
+        if 'critic' in (system_prompt or '').lower():
             payload = self._critic(human_prompt)
+        elif 'plan' in (system_prompt or '').lower():
+            payload = self._plan(human_prompt)
         else:
             payload = {'verdict': 'approve', 'confidence': 0.8,
                        'reasoning': 'mock verdict'}
@@ -129,7 +131,9 @@ class MockLLM:
 
     def _critic(self, human_prompt: str) -> dict:
         return {
-            'verdict': 'approve',
+            'approved': True,
+            'goal_reachable': True,
             'confidence': 0.75,
-            'reasoning': 'Deterministic mock verdict: no violation detected.',
+            'issues': [],
+            'suggested_fix': '',
         }

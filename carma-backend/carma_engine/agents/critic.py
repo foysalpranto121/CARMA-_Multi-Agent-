@@ -6,10 +6,16 @@ The critic is the agent-side half of the SCV: it reviews the proposed plan
 current stage, that it is backed by evidence, and that the claimed confidence
 is defensible.  It can send the plan back to the planner (repair round) when
 the goal is not reachable, and it can flag the case for escalation.
+
+A plan in which the planner deliberately declined to act (an empty activity
+list from the model) is final: no repair round can turn a refusal to guess
+into a plan, so the critic flags the case instead of spending the budget.
 """
 from __future__ import annotations
 
 import logging
+
+from ..llm.client import LLMUnavailable
 
 log = logging.getLogger('carma')
 
@@ -38,8 +44,13 @@ Return JSON:
   "suggested_fix": "<what the planner should change>"}}"""
 
 
-def critic_node(llm, tau: float = 0.5):
-    """Build the LangGraph critic node."""
+def critic_node(llm, tau: float = 0.5, max_repairs: int = 3):
+    """
+    Build the LangGraph critic node.
+
+    :param max_repairs: repair rounds the planner gets; once a further
+                        critique fails the case is flagged for escalation
+    """
     def _run(state: dict) -> dict:
         plan = state.get('plan') or {}
         process_state = state.get('process_state') or {}
@@ -47,6 +58,20 @@ def critic_node(llm, tau: float = 0.5):
         required = process_state.get('required_activities') or []
         forbidden = process_state.get('forbidden_activities') or []
         evidence = state.get('evidence') or []
+
+        if plan.get('plan_source') == 'llm' and not plan.get('activities'):
+            state['escalate'] = True
+            state['escalation_reason'] = (
+                (state.get('escalation_reason') or '') + ' Planner declined to act.').strip()
+            state['extras'] = {**(state.get('extras') or {}), 'critic': {
+                'approved': False, 'goal_reachable': False, 'declined': True,
+                'confidence': plan.get('confidence', 0.0),
+                'issues': [f"Planner declined: {plan.get('rationale', '')}".strip()],
+                'suggested_fix': '',
+            }}
+            state['messages'] = list(state.get('messages') or []) + [
+                {'role': 'critic', 'content': 'planner declined to act'}]
+            return state
 
         review = {
             'approved': True,
@@ -73,8 +98,10 @@ def critic_node(llm, tau: float = 0.5):
                     default=review,
                 ) or review
                 state['llm_calls'] = state.get('llm_calls', 0) + 1
+            except LLMUnavailable:
+                raise
             except Exception as exc:
-                log.warning('Critic LLM call failed (%s) — using heuristic review.', exc)
+                log.warning('Critic LLM call failed (%s) — mechanical review only.', exc)
 
         # ── mechanical checks (always applied) ──
         activities = plan.get('activities') or []
@@ -117,6 +144,10 @@ def critic_node(llm, tau: float = 0.5):
         if not review.get('goal_reachable', True):
             # A failed critique consumes one repair round.
             state['repair_round'] = int(state.get('repair_round', 0)) + 1
+            if state['repair_round'] > max_repairs:
+                state['escalate'] = True
+                state['escalation_reason'] = (
+                    (state.get('escalation_reason') or '') + ' Repair budget exhausted.').strip()
 
         state['extras'] = {**(state.get('extras') or {}), 'critic': review}
         state['messages'] = list(state.get('messages') or []) + [

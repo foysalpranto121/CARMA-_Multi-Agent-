@@ -22,21 +22,46 @@
 .PARAMETER Datasets
     Which logs to fetch.  Defaults to all four.
 
+.PARAMETER DataDir
+    Where the logs go.  Defaults to carma-backend\data, where the importer
+    reads them.
+
 .EXAMPLE
     pwsh scripts/fetch_event_logs.ps1
-    pwsh scripts/fetch_event_logs.ps1 -Datasets bpi2017
+    pwsh scripts/fetch_event_logs.ps1 -Datasets bpi2019
 #>
 [CmdletBinding()]
 param(
     [ValidateSet('bpi2017', 'bpi2019', 'bpi2020', 'rtfm')]
-    [string[]] $Datasets = @('bpi2017', 'bpi2019', 'bpi2020', 'rtfm')
+    [string[]] $Datasets = @('bpi2017', 'bpi2019', 'bpi2020', 'rtfm'),
+
+    [string] $DataDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 
 $RepoRoot = Split-Path -Parent $PSScriptRoot
-$DataDir  = Join-Path $RepoRoot 'data'
+if (-not $DataDir) {
+    $DataDir = Join-Path $RepoRoot 'carma-backend\data'
+}
+
+function Test-XesComplete {
+    # An interrupted download or extraction ends in the middle of an element;
+    # a complete XES document ends with its closing </log> tag.
+    param([string] $Path)
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $count = [Math]::Min(4096, $stream.Length)
+        $stream.Seek(-$count, [System.IO.SeekOrigin]::End) | Out-Null
+        $buffer = New-Object byte[] $count
+        $stream.Read($buffer, 0, $count) | Out-Null
+        return [System.Text.Encoding]::UTF8.GetString($buffer) -match '</log>\s*$'
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
 $UserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
              '(KHTML, like Gecko) Chrome/125.0 Safari/537.36'
 
@@ -96,8 +121,12 @@ foreach ($dataset in $Datasets) {
     $target = Join-Path $DataDir $source.File
 
     if (Test-Path $target) {
-        Write-Host "$dataset : already present ($([math]::Round((Get-Item $target).Length / 1MB, 1)) MB)"
-        continue
+        if (Test-XesComplete -Path $target) {
+            Write-Host "$dataset : already present ($([math]::Round((Get-Item $target).Length / 1MB, 1)) MB)"
+            continue
+        }
+        Write-Host "$dataset : $($source.File) is incomplete - moving it aside and downloading again"
+        Move-Item -LiteralPath $target -Destination "$target.incomplete" -Force
     }
 
     Write-Host "$dataset : resolving $($source.Landing)"
@@ -118,6 +147,9 @@ foreach ($dataset in $Datasets) {
              Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if ($found -and -not (Test-Path $target)) {
         Rename-Item -LiteralPath $found.FullName -NewName $source.File
+    }
+    if (-not (Test-XesComplete -Path $target)) {
+        throw "$dataset : $($source.File) is still incomplete after the download"
     }
 }
 

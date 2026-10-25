@@ -12,6 +12,7 @@ class Escalation(models.Model):
         ('repair_exhausted', 'Max Repair Rounds Exhausted'),
         ('conflicting_plans','Conflicting Agent Plans'),
         ('policy_breach',    'Policy Breach Detected'),
+        ('declined',         'Planner Declined to Act (clarification needed)'),
         ('manual',           'Manually Escalated'),
     ]
     STATUS_CHOICES = [

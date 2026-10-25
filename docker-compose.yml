@@ -1,5 +1,5 @@
-version: "3.9"
-
+# Run with the backend's settings so the database password is not written
+# here:   docker compose --env-file carma-backend/.env up -d
 services:
 
   # ── PostgreSQL (CARMADB) ──────────────────────────────────────
@@ -10,7 +10,8 @@ services:
     environment:
       POSTGRES_DB:       CARMADB
       POSTGRES_USER:     postgres
-      POSTGRES_PASSWORD: pranto121
+      # Only used to initialise a new volume.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-}
     volumes:
       - carma_postgres_data:/var/lib/postgresql/data
     ports:

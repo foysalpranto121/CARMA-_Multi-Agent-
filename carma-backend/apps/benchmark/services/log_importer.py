@@ -279,6 +279,172 @@ def extract_cases(df, spec: LogSpec, keep_lifecycle: tuple = ('complete',)):
     return cases
 
 
+#: Above this size an XES file is streamed trace by trace instead of being
+#: read into one event DataFrame: pm4py's reader needs several times the file
+#: size in memory, and BPI 2019 (about 700 MB) does not fit into 8 GB.
+STREAM_THRESHOLD_BYTES = 300 * 1024 * 1024
+
+_XES_VALUE_TAGS = ('string', 'date', 'int', 'float', 'boolean', 'id')
+
+
+def _local(tag: str) -> str:
+    """The tag without its XML namespace."""
+    return tag.rsplit('}', 1)[-1]
+
+
+def _xes_value(tag: str, raw: str):
+    """A typed XES attribute value as the XES reader types it."""
+    if tag == 'int':
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    if tag == 'float':
+        try:
+            value = float(raw)
+        except ValueError:
+            return None
+        return None if value != value else value
+    if tag == 'boolean':
+        return raw.strip().lower() == 'true'
+    return raw
+
+
+def _timestamp(raw: str | None):
+    """
+    A XES date as pm4py reads it.
+
+    pm4py keeps the wall-clock time written in the log and labels it UTC —
+    it drops the offset instead of converting.  The logs read through pm4py
+    carry their timestamps that way, so this reader does the same and every
+    log of the benchmark shares one convention.
+    """
+    import pandas as pd
+
+    if not raw:
+        return None
+    try:
+        stamp = pd.Timestamp(raw)
+    except (ValueError, TypeError):
+        return None
+    if stamp.tzinfo is not None:
+        stamp = stamp.tz_localize(None)
+    return stamp.tz_localize('UTC')
+
+
+def stream_xes_cases(path: str, spec: LogSpec,
+                     keep_lifecycle: tuple = ('complete',)) -> dict:
+    """
+    Read a XES file trace by trace and build the cases directly.
+
+    Produces what ``extract_cases(_normalise_frame(read_xes_frame(path), spec))``
+    produces, without materialising one row per event for the whole log:
+    each trace element is released as soon as its case has been built.
+
+    :raises ValueError: when the file is not a complete XES document (an
+        interrupted download ends in the middle of an element)
+    """
+    import xml.etree.ElementTree as ET
+
+    wanted = {name[len('case:'):]: name for name in spec.case_attributes
+              if name.startswith('case:')}
+    keep = {value.lower() for value in keep_lifecycle} if keep_lifecycle else None
+    cases: dict[str, ImportedCase] = {}
+    stack: list[str] = []
+    trace_attrs: dict = {}
+    events: list = []
+    event: dict | None = None
+
+    try:
+        for kind, element in ET.iterparse(path, events=('start', 'end')):
+            tag = _local(element.tag)
+            if kind == 'start':
+                stack.append(tag)
+                if tag == 'trace':
+                    trace_attrs, events = {}, []
+                elif tag == 'event':
+                    event = {}
+                continue
+
+            stack.pop()
+            parent = stack[-1] if stack else ''
+            if tag in _XES_VALUE_TAGS:
+                value = (tag, element.get('value', ''))
+                if parent == 'event' and event is not None:
+                    event[element.get('key')] = value
+                elif parent == 'trace':
+                    trace_attrs[element.get('key')] = value
+            elif tag == 'event':
+                if event is not None:
+                    events.append(event)
+                event = None
+                element.clear()
+            elif tag == 'trace':
+                case = _case_from_trace(trace_attrs, events, wanted, keep)
+                if case is not None:
+                    cases[case.case_id] = case
+                element.clear()
+    except ET.ParseError as exc:
+        raise ValueError(
+            f'{path} is not a complete XES file ({exc}). Download it again with '
+            f'scripts/fetch_event_logs.ps1.'
+        ) from exc
+    return cases
+
+
+def _case_from_trace(trace_attrs: dict, events: list, wanted: dict, keep) -> ImportedCase | None:
+    name = trace_attrs.get('concept:name')
+    if name is None:
+        return None
+
+    rows = []
+    for position, attrs in enumerate(events):
+        lifecycle = (attrs.get('lifecycle:transition') or ('string', 'complete'))[1]
+        if keep is not None and lifecycle.lower() not in keep:
+            continue
+        activity = attrs.get('concept:name')
+        if activity is None:
+            continue
+        resource = attrs.get('org:resource') or attrs.get('user')
+        origin = attrs.get('EventOrigin')
+        rows.append((_timestamp((attrs.get('time:timestamp') or ('date', ''))[1]), position, {
+            'activity':  activity[1],
+            # pm4py reads an event without a resource as a missing value.
+            'resource':  resource[1] if resource else None,
+            'origin':    origin[1] if origin else '',
+        }))
+    if not rows:
+        return None
+
+    # Within a case the events run in time order; events without a time go
+    # last and ties keep the order of the file (a stable sort).
+    rows.sort(key=lambda row: (row[0] is None, row[0] if row[0] is not None else 0, row[1]))
+    activities = []
+    for stamp, _, row in rows:
+        activities.append(_json_safe({
+            'activity':  row['activity'],
+            'timestamp': _iso(stamp),
+            'resource':  row['resource'],
+            'origin':    row['origin'],
+        }))
+
+    attributes = {}
+    for key, column in wanted.items():
+        if key in trace_attrs:
+            tag, raw = trace_attrs[key]
+            value = _xes_value(tag, raw)
+            if value is not None:
+                attributes[column] = value
+
+    return ImportedCase(
+        case_id=str(name[1]),
+        activities=activities,
+        attributes=_json_safe(attributes),
+        start_time=activities[0]['timestamp'],
+        end_time=activities[-1]['timestamp'],
+    )
+
+
 def _json_safe(value):
     """
     Make a value storable in a JSON column.
@@ -409,10 +575,12 @@ def import_log(dataset_key: str, process_id=None, split_ratio: float | None = No
         )
 
     log.info('Reading %s from %s', dataset_key, path)
-    df = read_xes_frame(path)
-    df = _normalise_frame(df, spec)
-
-    cases = extract_cases(df, spec)
+    if os.path.getsize(path) > STREAM_THRESHOLD_BYTES:
+        cases = stream_xes_cases(path, spec)
+    else:
+        df = read_xes_frame(path)
+        df = _normalise_frame(df, spec)
+        cases = extract_cases(df, spec)
     train, test = split_cases(cases, spec)
 
     activities = sorted({a['activity'] for c in cases.values()

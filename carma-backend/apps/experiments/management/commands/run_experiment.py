@@ -13,11 +13,16 @@ Usage
     python manage.py run_experiment --configs B0 B1 B2 B3 B4 B5 B6 B7 \
         --seed 42 --process all
     python manage.py run_experiment --configs B1 --mock-llm --limit 20
+    python manage.py run_experiment --configs B4 B7 --per-scenario 4   # 28-case pilot
 
 The ``--mock-llm`` flag substitutes the deterministic test double of
 :mod:`carma_engine.llm.mock`.  It exercises the pipeline without a model
 endpoint; a run that used it is recorded with ``llm_backend = "mock"`` and
 its results are *not* model results.
+
+Without ``--mock-llm`` a configuration whose model cannot be reached (for
+Claude: no ``ANTHROPIC_API_KEY`` in ``carma-backend/.env``) stops before its
+first case.
 """
 from __future__ import annotations
 
@@ -29,7 +34,8 @@ from django.utils import timezone
 
 from apps.benchmark.models import BenchmarkCase
 from apps.experiments.models import Adaptation, ExperimentRun, RunConfiguration, RunResult
-from apps.experiments.tasks import aggregate_results
+from apps.experiments.tasks import aggregate_results, persist_outcome
+from carma_engine.llm.client import LLMUnavailable
 from carma_engine.runners import get_runner
 
 
@@ -45,10 +51,13 @@ class Command(BaseCommand):
                             help='Process id or name to run, or "all".')
         parser.add_argument('--limit', type=int, default=0,
                             help='Only run the first N benchmark cases (0 = all).')
+        parser.add_argument('--per-scenario', type=int, default=0,
+                            help='Only run N cases of each scenario S0-S6, taken in '
+                                 'turn from each process (0 = all).')
         parser.add_argument('--mock-llm', action='store_true',
                             help='Use the deterministic test double instead of a model.')
         parser.add_argument('--reset', action='store_true',
-                            help='Delete the previous run of the same configuration and seed.')
+                            help='Delete the earlier runs of the same configuration and seed.')
 
     def handle(self, *args, **options):
         codes = [str(code).upper() for code in options['configs']]
@@ -71,8 +80,15 @@ class Command(BaseCommand):
 
             llm = MockLLM(seed=options['seed'])
 
-        for code in codes:
-            configuration = self._configuration(code)
+        configurations = [self._configuration(code) for code in codes]
+        for configuration in configurations:
+            try:
+                get_runner(configuration.code, config=configuration,
+                           seed=options['seed'], llm=llm).check_llm()
+            except LLMUnavailable as exc:
+                raise CommandError(f'{configuration.code}: {exc}') from exc
+
+        for configuration in configurations:
             self._run_configuration(configuration, cases, options, llm)
 
     # ── helpers ────────────────────────────────────────────────
@@ -92,36 +108,30 @@ class Command(BaseCommand):
         if selector and selector.lower() != 'all':
             queryset = queryset.filter(process__name=selector) | queryset.filter(
                 process_id=selector)
-        queryset = queryset.distinct().order_by('scenario__code', 'case_id')
+        queryset = queryset.distinct().order_by('scenario__code', 'process_id', 'case_id')
+        per_scenario = int(options.get('per_scenario') or 0)
+        if per_scenario:
+            return _stratified(queryset, per_scenario)
         limit = int(options['limit'] or 0)
         return list(queryset[:limit] if limit else queryset)
 
     def _run_configuration(self, configuration, cases, options, llm):
         seed = int(options['seed'])
-        run = ExperimentRun.objects.filter(
-            configuration=configuration, seed=seed).order_by('-created_at').first()
-        if run and options['reset']:
-            Adaptation.objects.filter(run=run).delete()
-            RunResult.objects.filter(run=run).delete()
-            run.delete()
-            run = None
-        if run is None:
-            run = ExperimentRun.objects.create(
-                configuration=configuration,
-                process=cases[0].process if len({c.process_id for c in cases}) == 1 else None,
-                seed=seed,
-                status='running',
-                started_at=timezone.now(),
-                total_cases=len(cases),
-            )
-        else:
-            run.status = 'running'
-            run.started_at = timezone.now()
-            run.total_cases = len(cases)
-            run.completed_cases = 0
-            run.failed_cases = 0
-            run.error_log = ''
-            run.save()
+        if options['reset']:
+            previous = ExperimentRun.objects.filter(configuration=configuration, seed=seed)
+            Adaptation.objects.filter(run__in=previous).delete()
+            RunResult.objects.filter(run__in=previous).delete()
+            previous.delete()
+        # Every invocation is its own run: appending to an earlier run of the
+        # same configuration would mix two executions in one result.
+        run = ExperimentRun.objects.create(
+            configuration=configuration,
+            process=cases[0].process if len({c.process_id for c in cases}) == 1 else None,
+            seed=seed,
+            status='running',
+            started_at=timezone.now(),
+            total_cases=len(cases),
+        )
 
         runner = get_runner(configuration.code, config=configuration, seed=seed, llm=llm)
         started = time.monotonic()
@@ -139,32 +149,12 @@ class Command(BaseCommand):
             status = output.get('status') or 'failed'
             if status == 'failed':
                 failed += 1
+                self.stderr.write(f'  {benchmark_case.id}: {output.get("error", "")}')
             else:
                 completed += 1
             with transaction.atomic():
-                Adaptation.objects.create(
-                    run=run,
-                    benchmark_case=benchmark_case,
-                    plan_id=output.get('plan_id', ''),
-                    adaptation=output.get('plan') or {},
-                    activity_seq=output.get('activity_seq') or [],
-                    confidence=output.get('confidence'),
-                    scv_approved=output.get('scv_approved'),
-                    scv_token=output.get('scv_token') or '',
-                    viol_cost=float(output.get('viol_cost') or 0.0),
-                    exec_cost=float(output.get('exec_cost') or 0.0),
-                    total_cost=(float(output.get('viol_cost') or 0.0)
-                                + float(output.get('exec_cost') or 0.0)),
-                    retrieved_docs=output.get('retrieved_docs') or [],
-                    retrieval_scores=output.get('retrieval_scores') or {},
-                    task_success=output.get('task_success'),
-                    conformance_fitness=output.get('conformance_fitness'),
-                    repair_rounds=int(output.get('repair_rounds') or 0),
-                    status=status,
-                    latency_s=output.get('latency_s'),
-                    llm_tokens=int(output.get('tokens_used') or 0),
-                )
-            if (completed + failed) % 100 == 0:
+                persist_outcome(run, benchmark_case, output)
+            if (completed + failed) % 10 == 0:
                 self.stdout.write(f'  {completed + failed}/{len(cases)} cases …')
 
         run.completed_cases = completed
@@ -189,3 +179,30 @@ class Command(BaseCommand):
                 f'escalation {result.escalation_rate!r} | '
                 f'tokens {result.total_llm_tokens}'
             )
+        cost = sum(value for value in Adaptation.objects.filter(run=run)
+                   .values_list('usd_cost', flat=True) if value)
+        if cost:
+            self.stdout.write(f'   list-price cost ${cost:.2f}')
+
+
+def _stratified(queryset, per_scenario: int) -> list:
+    """
+    ``per_scenario`` cases of every scenario, taken in turn from each process,
+    so that a small pilot still covers every scenario and every process.
+    """
+    cells: dict = {}
+    for benchmark_case in queryset:
+        cells.setdefault(benchmark_case.scenario.code, {}).setdefault(
+            str(benchmark_case.process_id), []).append(benchmark_case)
+
+    chosen = []
+    for code in sorted(cells):
+        queues = [cells[code][process] for process in sorted(cells[code])]
+        picked, index = [], 0
+        while len(picked) < per_scenario and any(index < len(queue) for queue in queues):
+            for queue in queues:
+                if index < len(queue) and len(picked) < per_scenario:
+                    picked.append(queue[index])
+            index += 1
+        chosen.extend(picked)
+    return chosen

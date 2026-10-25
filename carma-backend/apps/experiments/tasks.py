@@ -11,6 +11,10 @@ from django.utils import timezone
 
 log = logging.getLogger('carma')
 
+# Adaptations whose executed trace violates a hard constraint.  Rows recorded
+# before ``hard_violation`` existed fall back to "any violation cost".
+HARD_VIOLATION = Q(hard_violation=True) | Q(hard_violation__isnull=True, viol_cost__gt=0)
+
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def run_experiment(self, run_id: str):
@@ -21,6 +25,8 @@ def run_experiment(self, run_id: str):
     """
     from apps.benchmark.models import BenchmarkCase
     from apps.experiments.models import ExperimentRun
+    from carma_engine.llm.client import LLMUnavailable
+    from carma_engine.runners import get_runner
 
     try:
         run = ExperimentRun.objects.select_related(
@@ -28,6 +34,18 @@ def run_experiment(self, run_id: str):
     except ExperimentRun.DoesNotExist:
         log.error('ExperimentRun %s not found.', run_id)
         return {'status': 'failed', 'error': 'run not found'}
+
+    # A configuration whose model cannot be reached would fail every case;
+    # the run stops here instead of recording hundreds of failures.
+    try:
+        get_runner(run.configuration.code, config=run.configuration, seed=run.seed).check_llm()
+    except LLMUnavailable as exc:
+        run.status = 'failed'
+        run.error_log = str(exc)
+        run.save(update_fields=['status', 'error_log'])
+        _push_progress(run_id, 0, 0, 'failed')
+        log.error('Experiment %s not started: %s', run_id, exc)
+        return {'status': 'failed', 'error': str(exc)}
 
     run.status    = 'running'
     run.started_at = timezone.now()
@@ -63,7 +81,7 @@ def run_case(self, run_id: str, benchmark_case_id: str):
     :returns: a small summary dict (the full result is persisted as an
               ``Adaptation``).
     """
-    from apps.experiments.models import Adaptation, ExperimentRun
+    from apps.experiments.models import ExperimentRun
 
     start = time.monotonic()
 
@@ -86,45 +104,69 @@ def run_case(self, run_id: str, benchmark_case_id: str):
         _increment(run, 'failed_cases')
         return {'status': 'failed', 'error': str(exc)}
 
-    latency = time.monotonic() - start
-    output['latency_s'] = output.get('latency_s') or latency
+    output['latency_s'] = output.get('latency_s') or (time.monotonic() - start)
 
     try:
-        adaptation = Adaptation.objects.create(
-            run                  = run,
-            benchmark_case       = bc,
-            plan_id              = output.get('plan_id', ''),
-            adaptation           = output.get('plan') or {},
-            activity_seq         = output.get('activity_seq') or [],
-            confidence           = output.get('confidence'),
-            scv_approved         = output.get('scv_approved'),
-            scv_token            = output.get('scv_token') or '',
-            viol_cost            = float(output.get('viol_cost') or 0.0),
-            exec_cost            = float(output.get('exec_cost') or 0.0),
-            total_cost           = float(output.get('viol_cost') or 0.0)
-                                   + float(output.get('exec_cost') or 0.0),
-            retrieved_docs       = output.get('retrieved_docs') or [],
-            retrieval_scores     = output.get('retrieval_scores') or {},
-            task_success         = output.get('task_success'),
-            conformance_fitness  = output.get('conformance_fitness'),
-            repair_rounds        = int(output.get('repair_rounds') or 0),
-            status               = output.get('status') or 'failed',
-            latency_s            = output['latency_s'],
-            llm_tokens           = int(output.get('tokens_used') or 0),
-        )
+        adaptation = persist_outcome(run, bc, output)
     except Exception as exc:
         log.exception('Could not persist adaptation for bc=%s: %s', benchmark_case_id, exc)
         _increment(run, 'failed_cases')
         return {'status': 'failed', 'error': str(exc)}
 
-    _write_audit(run, bc, adaptation, output)
-    _increment(run, 'completed_cases')
+    _increment(run, 'failed_cases' if adaptation.status == 'failed' else 'completed_cases')
     _push_progress(run_id, run.total_cases, run.completed_cases, 'running')
+    return {'adaptation_id': str(adaptation.id), 'status': adaptation.status}
 
+
+def persist_outcome(run, benchmark_case, output: dict):
+    """
+    Store the outcome of one case: the adaptation, its hash-chained audit
+    entries and, when the case was escalated, its review-queue entry.
+
+    Both execution paths — this Celery task and ``manage.py run_experiment`` —
+    go through here, so they record identical rows.
+    """
+    from apps.experiments.models import Adaptation
+
+    viol_cost = float(output.get('viol_cost') or 0.0)
+    exec_cost = float(output.get('exec_cost') or 0.0)
+    adaptation = Adaptation.objects.create(
+        run                  = run,
+        benchmark_case       = benchmark_case,
+        plan_id              = output.get('plan_id', ''),
+        adaptation           = output.get('plan') or {},
+        activity_seq         = output.get('activity_seq') or [],
+        planned_seq          = output.get('planned_seq') or [],
+        confidence           = output.get('confidence'),
+        scv_approved         = output.get('scv_approved'),
+        scv_token            = output.get('scv_token') or '',
+        viol_cost            = viol_cost,
+        exec_cost            = exec_cost,
+        total_cost           = viol_cost + exec_cost,
+        retrieved_docs       = output.get('retrieved_docs') or [],
+        retrieval_scores     = output.get('retrieval_scores') or {},
+        task_success         = output.get('task_success'),
+        goal_reached         = output.get('goal_reached'),
+        gold_exact_match     = output.get('gold_exact_match'),
+        gold_similarity      = output.get('gold_similarity'),
+        hard_violation       = output.get('hard_violation'),
+        unsafe_action        = output.get('unsafe_action'),
+        conformance_fitness  = output.get('conformance_fitness'),
+        repair_rounds        = int(output.get('repair_rounds') or 0),
+        plan_source          = output.get('plan_source') or '',
+        llm_backend          = output.get('llm_backend') or '',
+        served_by            = output.get('served_by') or {},
+        llm_calls            = int(output.get('llm_calls') or 0),
+        usd_cost             = output.get('usd_cost'),
+        error                = output.get('error') or '',
+        status               = output.get('status') or 'failed',
+        latency_s            = output.get('latency_s'),
+        llm_tokens           = int(output.get('tokens_used') or 0),
+    )
+    _write_audit(run, benchmark_case, adaptation, output)
     if output.get('needs_escalation'):
         _create_escalation(adaptation, output)
-
-    return {'adaptation_id': str(adaptation.id), 'status': adaptation.status}
+    return adaptation
 
 
 @shared_task
@@ -155,14 +197,14 @@ def aggregate_results(results, run_id: str):
             mean_viol    = Avg('viol_cost'),
             total_tokens = Sum('llm_tokens'),
             n            = Count('id'),
-            n_violations = Count('id', filter=Q(viol_cost__gt=0)),
+            n_violations = Count('id', filter=HARD_VIOLATION),
             n_escalated  = Count('id', filter=Q(status='escalated')),
             n_success    = Count('id', filter=Q(status='success')),
         )
 
         total = aggs['n'] or 0
-        # Constraint Violation Rate = share of adaptations that violated at
-        # least one constraint (not the mean violation cost).
+        # Constraint Violation Rate = share of adaptations whose executed
+        # trace violates at least one hard constraint (not the mean cost).
         cvr = (aggs['n_violations'] / total) if total else None
         escalation_rate = (aggs['n_escalated'] / total) if total else None
         repair_rate = (aggs['n_success'] / total) if total else None
@@ -249,7 +291,7 @@ def _write_run_metrics(run):
             bucket['n'] += 1
             if adaptation.task_success is not None:
                 bucket['tsr'] = (bucket['tsr'] or 0) + (1.0 if adaptation.task_success else 0.0)
-            if adaptation.viol_cost and adaptation.viol_cost > 0:
+            if adaptation.constraint_violated:
                 bucket['n_viol'] += 1
             if adaptation.status == 'escalated':
                 bucket['n_esc'] += 1
@@ -314,21 +356,24 @@ def _write_audit(run, benchmark_case, adaptation, output):
         ('plan', {
             'plan_id': adaptation.plan_id,
             'plan': adaptation.adaptation,
-            'activity_seq': adaptation.activity_seq,
+            'planned_seq': adaptation.planned_seq,
+            'plan_source': adaptation.plan_source,
             'confidence': adaptation.confidence,
         }, 'planner'),
         ('scv_check', {
             'approved': adaptation.scv_approved,
             'token': adaptation.scv_token,
-            'violation_cost': adaptation.viol_cost,
             'violation_report': output.get('violation_report') or {},
         }, 'scv'),
         ('action', {
             'status': adaptation.status,
+            'executed_seq': adaptation.activity_seq,
+            'viol_cost': adaptation.viol_cost,
             'exec_cost': adaptation.exec_cost,
             'total_cost': adaptation.total_cost,
             'latency_s': adaptation.latency_s,
             'repair_rounds': adaptation.repair_rounds,
+            'error': adaptation.error,
         }, 'executor'),
     ]
 
@@ -347,25 +392,33 @@ def _write_audit(run, benchmark_case, adaptation, output):
 
 
 def _create_escalation(adaptation, output):
-    """Create an escalation record for low-confidence or violation cases."""
+    """Create the review-queue entry of an escalated case."""
     try:
         from apps.reviews.models import Escalation
 
-        confidence = output.get('confidence')
-        reason = 'low_confidence'
+        detail = output.get('escalation_reason') or ''
         if adaptation.scv_approved is False:
             reason = 'scv_violation'
-        elif output.get('escalation_reason'):
-            reason = 'repair_exhausted' if 'Repair budget' in output['escalation_reason'] else 'policy_breach'
+        elif 'declined' in detail:
+            reason = 'declined'
+        elif 'Repair budget' in detail:
+            reason = 'repair_exhausted'
+        elif 'confidence' in detail:
+            reason = 'low_confidence'
+        else:
+            reason = 'policy_breach'
 
+        # Nothing ran, so the cost the reviewer needs is that of the plan
+        # the verifier saw.
+        proposed_cost = float((output.get('violation_report') or {}).get('total_cost') or 0.0)
         Escalation.objects.get_or_create(
             adaptation=adaptation,
             defaults={
                 'reason':       reason,
-                'reason_detail': output.get('escalation_reason', ''),
-                'confidence':   confidence,
-                'viol_cost':    adaptation.viol_cost,
-                'priority':     1 if adaptation.viol_cost > 5 else 2,
+                'reason_detail': detail,
+                'confidence':   output.get('confidence'),
+                'viol_cost':    proposed_cost,
+                'priority':     1 if proposed_cost > 5 else 2,
             }
         )
         try:

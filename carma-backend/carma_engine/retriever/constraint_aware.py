@@ -3,11 +3,13 @@ Constraint-Aware Retriever (CAR) and the plain vector-RAG baseline.
 
 CAR pipeline
 ------------
-1. **Recall**   candidates for the process corpus.  The corpus of record is the
-   database (``processes.CorpusDocument``); when Qdrant is available the
-   documents are materialised into a vector index and the dense top-k is
-   merged with the database candidates so the retrievable set is never
-   silently empty.
+1. **Recall**   every document of the process corpus is a candidate.  The
+   corpus of record is the database (``processes.CorpusDocument``);
+   ``manage.py index_corpus`` materialises it into the Qdrant index, whose
+   stored vectors are reused, so nothing is re-embedded per case.  Without
+   an index the documents are embedded in-process.  A dense top-N recall
+   would be cheaper but would hand the stage filter a set that is mostly
+   invalid for the case — CAR has to choose among all valid documents.
 2. **Filter**   drop candidates that are not valid for the case timestamp,
    the current stage, or the currently enabled activities
    (:func:`~carma_engine.retriever.scorer.is_candidate_valid`).
@@ -25,8 +27,6 @@ from .scorer import cosine_sim, is_candidate_valid, score_candidate
 log = logging.getLogger('carma')
 
 DEFAULT_TOP_K = 10
-RECALL_MULTIPLIER = 5
-MAX_CANDIDATES = 200
 
 
 def _provenance_id(doc_id: str) -> str:
@@ -57,9 +57,17 @@ class ConstraintAwareRetriever:
         queryset = CorpusDocument.objects.all()
         if process_id:
             queryset = queryset.filter(process_id=process_id)
-        return queryset[:MAX_CANDIDATES]
+        return queryset.order_by('id')
 
     def _candidates(self, process_id: str | None, query: str) -> list[dict]:
+        corpus = getattr(self.embedder, 'corpus', None)
+        if corpus is not None:
+            indexed = corpus(process_id)
+            if indexed:
+                # copies: callers annotate candidates, the cache must stay clean
+                return [dict(candidate) for candidate in indexed]
+            log.warning('The vector index holds no documents for process %s; '
+                        'run "python manage.py index_corpus".', process_id)
         candidates = []
         for document in self._corpus_documents(process_id):
             payload = document_to_payload(document)

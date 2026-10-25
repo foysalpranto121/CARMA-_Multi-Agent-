@@ -135,6 +135,8 @@ class Adaptation(models.Model):
         ('violation', 'Violation'),
         ('escalated', 'Escalated'),
         ('repair',    'Repair'),
+        ('blocked',   'Blocked by the SCV'),
+        ('declined',  'Declined to act'),
         ('failed',    'Failed'),
     ]
 
@@ -162,10 +164,33 @@ class Adaptation(models.Model):
                         help_text='[{doc_id, score, provenance_id}] list')
     retrieval_scores = models.JSONField(default=dict)
 
-    # Metrics
-    task_success  = models.BooleanField(null=True, blank=True)
+    # Metrics — scored against the gold by carma_engine.scoring
+    task_success  = models.BooleanField(null=True, blank=True,
+                        help_text='Goal reached with no hard violation')
+    goal_reached  = models.BooleanField(null=True, blank=True)
+    gold_exact_match = models.BooleanField(null=True, blank=True,
+                        help_text='Executed sequence equals the gold sequence')
+    gold_similarity  = models.FloatField(null=True, blank=True,
+                        help_text='2·LCS similarity of the executed and the gold sequence')
+    hard_violation   = models.BooleanField(null=True, blank=True,
+                        help_text='The executed trace violates a hard constraint')
+    unsafe_action    = models.BooleanField(null=True, blank=True,
+                        help_text='A violating write action was executed')
     conformance_fitness = models.FloatField(null=True, blank=True)
     repair_rounds = models.PositiveSmallIntegerField(default=0)
+
+    # Provenance of the adaptation
+    planned_seq   = models.JSONField(default=list, blank=True,
+                        help_text='Activities the agent proposed (activity_seq is what ran)')
+    plan_source   = models.CharField(max_length=20, blank=True,
+                        help_text='llm | unparseable | error | heuristic | rule_based')
+    llm_backend   = models.CharField(max_length=20, blank=True,
+                        help_text='anthropic | openai | ollama | mock | rule_based')
+    served_by     = models.JSONField(default=dict, blank=True,
+                        help_text='Model id -> calls it served (shows refusal fallbacks)')
+    llm_calls     = models.PositiveIntegerField(default=0)
+    usd_cost      = models.FloatField(null=True, blank=True, help_text='List-price cost of the case')
+    error         = models.TextField(blank=True)
 
     status        = models.CharField(max_length=10, choices=STATUS_CHOICES, default='failed')
     latency_s     = models.FloatField(null=True, blank=True, help_text='End-to-end latency in seconds')
@@ -181,6 +206,18 @@ class Adaptation(models.Model):
 
     def __str__(self):
         return f'Adaptation:{self.id} [{self.status}]'
+
+    @property
+    def constraint_violated(self) -> bool:
+        """
+        The CVR outcome: the executed trace violates a hard constraint.
+
+        Rows recorded before ``hard_violation`` existed fall back to "any
+        violation cost".
+        """
+        if self.hard_violation is not None:
+            return self.hard_violation
+        return bool(self.viol_cost and self.viol_cost > 0)
 
 
 class RunResult(models.Model):

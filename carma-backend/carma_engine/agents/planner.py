@@ -10,10 +10,26 @@ mechanically (not just asked for in the prompt):
 A plan that cites unknown evidence is repaired by dropping the unknown ids and
 marking the plan as lower confidence, so an unverifiable citation can never
 silently inflate the reported evidence quality.
+
+Every plan records where it came from in ``plan_source``:
+
+  * ``llm``         — the model's own plan; an explicit empty activity list is
+                      the model declining to act (rule 6) and is kept as such
+  * ``unparseable`` — the model answered, but not with a plan
+  * ``error``       — the model call raised
+  * ``heuristic``   — no model is configured for this node
+
+A heuristic plan is never put in place of a model's answer: that would credit
+the model with behaviour it did not produce.  When no model is reachable at
+all the call raises :class:`~carma_engine.llm.client.LLMUnavailable`, which
+propagates and fails the case.
 """
 from __future__ import annotations
 
 import logging
+import uuid
+
+from ..llm.client import LLMUnavailable
 
 log = logging.getLogger('carma')
 
@@ -47,6 +63,9 @@ Required activities: {required}
 Forbidden activities: {forbidden}
 Executed prefix: {prefix}
 
+Verifier feedback on the previous plan:
+{feedback}
+
 Evidence (cite these provenance IDs):
 {evidence_summary}
 
@@ -71,6 +90,31 @@ def summarize_evidence(evidence: list) -> str:
             f"{(payload.get('content') or '')[:MAX_EVIDENCE_CHARS]}"
         )
     return '\n'.join(lines) if lines else '(no evidence retrieved)'
+
+
+def summarize_feedback(report: dict | None) -> str:
+    """Render the verifier's rejection of the previous plan for a repair round."""
+    violations = (report or {}).get('violations') or []
+    if not violations:
+        return '(none)'
+    lines = [
+        f"- [{item.get('severity', '?')}] {item.get('constraint_type', '?')}: "
+        f"{item.get('detail') or item.get('constraint_id', '')}"
+        for item in violations[:8]
+    ]
+    return 'The previous plan was rejected:\n' + '\n'.join(lines)
+
+
+def _empty_plan(rationale: str) -> dict:
+    return {
+        'plan_id': str(uuid.uuid4()),
+        'activities': [],
+        'parameters': {},
+        'evidence_ids': [],
+        'confidence': 0.0,
+        'rationale': rationale,
+        'goal_reachable': False,
+    }
 
 
 def _sanitize_plan(plan: dict, evidence: list) -> dict:
@@ -105,10 +149,12 @@ def planner_node(llm):
             'prefix': [event.get('activity', '')
                        for event in (state.get('prefix_trace') or [])],
             'evidence_summary': summarize_evidence(evidence),
+            'feedback': summarize_feedback(state.get('violation_report')),
         }
 
-        plan: dict = {}
-        if llm is not None:
+        if llm is None:
+            plan, source = _heuristic_plan(payload, evidence), 'heuristic'
+        else:
             try:
                 plan = llm.invoke_json(
                     PLANNER_SYSTEM,
@@ -116,13 +162,17 @@ def planner_node(llm):
                     default={},
                 ) or {}
                 state['llm_calls'] = state.get('llm_calls', 0) + 1
+                source = 'llm' if isinstance(plan.get('activities'), list) else 'unparseable'
+            except LLMUnavailable:
+                raise
             except Exception as exc:
-                log.warning('Planner LLM call failed (%s) — using heuristic plan.', exc)
-
-        if not plan.get('activities'):
-            plan = _heuristic_plan(payload, evidence)
+                log.warning('Planner LLM call failed (%s).', exc)
+                plan, source = {}, 'error'
+            if source != 'llm':
+                plan = _empty_plan(f'No usable plan from the model ({source}).')
 
         plan = _sanitize_plan(plan, evidence)
+        plan['plan_source'] = source
         state['plan'] = plan
         state['messages'] = list(state.get('messages') or []) + [
             {'role': 'planner',
@@ -138,13 +188,11 @@ def _heuristic_plan(payload: dict, evidence: list) -> dict:
     """
     Deterministic fallback plan.
 
-    Used when no LLM is reachable.  It is intentionally conservative: it
-    proposes the activities the state estimator reports as due — the
-    obligations the executed prefix left open — in the order in which they
-    appear in the enabled set, and reports a low confidence.
+    Used only when the node has no model at all.  It is intentionally
+    conservative: it proposes the activities the state estimator reports as
+    due — the obligations the executed prefix left open — in the order in
+    which they appear in the enabled set, and reports a low confidence.
     """
-    import uuid
-
     enabled = payload.get('enabled') or []
     required = payload.get('required') or []
     forbidden = set(payload.get('forbidden') or [])
@@ -168,6 +216,6 @@ def _heuristic_plan(payload: dict, evidence: list) -> dict:
         'parameters': {},
         'evidence_ids': [item.get('provenance_id') for item in (evidence or [])[:3]],
         'confidence': 0.3,
-        'rationale': 'Heuristic plan (no LLM endpoint available).',
+        'rationale': 'Heuristic plan (no model configured for the planner).',
         'goal_reachable': bool(activities),
     }
