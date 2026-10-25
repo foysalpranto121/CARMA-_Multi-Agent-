@@ -166,6 +166,17 @@ def persist_outcome(run, benchmark_case, output: dict):
     _write_audit(run, benchmark_case, adaptation, output)
     if output.get('needs_escalation'):
         _create_escalation(adaptation, output)
+    _push(run.id, {
+        'type':           'case_complete',
+        'adaptation_id':  str(adaptation.id),
+        'case_id':        benchmark_case.case.case_id,
+        'scenario':       benchmark_case.scenario.code,
+        'status':         adaptation.status,
+        'task_success':   adaptation.task_success,
+        'hard_violation': adaptation.hard_violation,
+        'latency_s':      adaptation.latency_s,
+        'ts':             timezone.now().isoformat(),
+    })
     return adaptation
 
 
@@ -317,26 +328,25 @@ def _write_run_metrics(run):
 
 def _push_progress(run_id, total, completed, status):
     """Push real-time progress to the WebSocket channel group."""
+    _push(run_id, {
+        'type':      'progress',
+        'run_id':    str(run_id),
+        'total':     total,
+        'completed': completed,
+        'pct':       round(completed / total * 100, 1) if total else 0,
+        'status':    status,
+        'ts':        timezone.now().isoformat(),
+    })
+
+
+def _push(run_id, data: dict):
+    """Send one message to the run's live stream (``ws/experiments/<id>/logs/``)."""
     try:
         from asgiref.sync import async_to_sync
         from channels.layers import get_channel_layer
 
-        layer = get_channel_layer()
-        async_to_sync(layer.group_send)(
-            f'run_{run_id}',
-            {
-                'type': 'experiment_log',
-                'data': {
-                    'type':      'progress',
-                    'run_id':    str(run_id),
-                    'total':     total,
-                    'completed': completed,
-                    'pct':       round(completed / total * 100, 1) if total else 0,
-                    'status':    status,
-                    'ts':        timezone.now().isoformat(),
-                }
-            }
-        )
+        async_to_sync(get_channel_layer().group_send)(
+            f'run_{run_id}', {'type': 'experiment_log', 'data': data})
     except Exception as exc:
         log.debug('WebSocket push failed: %s', exc)
 

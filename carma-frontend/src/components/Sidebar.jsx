@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   LayoutDashboard, FlaskConical, Database, BarChart3,
   ShieldAlert, ScrollText, ChevronRight, ChevronLeft,
-  Cpu, LogOut
+  Cpu, LogOut, ClipboardCheck
 } from 'lucide-react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useAuthStore, hasRole } from '../store/authStore';
@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { to: '/metrics',     icon: BarChart3,        label: 'Metrics',     tip: 'Results & Statistics', roles: ['researcher'] },
   { to: '/review',      icon: ShieldAlert,      label: 'Review',      tip: 'Escalation Queue', roles: ['reviewer'] },
   { to: '/audit',       icon: ScrollText,       label: 'Audit',       tip: 'Audit Log', roles: ['researcher'] },
+  { to: '/annotate',    icon: ClipboardCheck,   label: 'Annotate',    tip: 'Gold Annotation', roles: ['annotator'] },
 ];
 
 const ROLE_COLOR = {

@@ -41,6 +41,7 @@ const TONES = {
   critical: 'rose', unreachable: 'rose', degraded: 'gold',
   cancelled: 'violet', paused: 'violet', deferred: 'violet',
   modified: 'violet', validated: 'violet',
+  blocked: 'gold', declined: 'violet',
 };
 
 export const toneFor = (status) => TONES[String(status ?? '').toLowerCase()] ?? 'cyan';

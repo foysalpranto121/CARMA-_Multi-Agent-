@@ -34,7 +34,7 @@ from django.utils import timezone
 
 from apps.benchmark.models import BenchmarkCase
 from apps.experiments.models import Adaptation, ExperimentRun, RunConfiguration, RunResult
-from apps.experiments.tasks import aggregate_results, persist_outcome
+from apps.experiments.tasks import _push_progress, aggregate_results, persist_outcome
 from carma_engine.llm.client import LLMUnavailable
 from carma_engine.runners import get_runner
 
@@ -154,6 +154,7 @@ class Command(BaseCommand):
                 completed += 1
             with transaction.atomic():
                 persist_outcome(run, benchmark_case, output)
+            _push_progress(run.id, len(cases), completed + failed, 'running')
             if (completed + failed) % 10 == 0:
                 self.stdout.write(f'  {completed + failed}/{len(cases)} cases …')
 

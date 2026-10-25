@@ -86,6 +86,9 @@ export const benchmarkApi = {
   eventLogs:  (params)   => apiClient.get('/event-logs/', { params }),
   casesRaw:   (params)   => apiClient.get('/cases/', { params }),
   importLog:  (payload)  => apiClient.post('/benchmark/import-log/', payload),
+  annotations: (id)      => apiClient.get(`/benchmark/cases/${id}/annotations/`),
+  annotate:   (id, payload) => apiClient.post(`/benchmark/cases/${id}/annotations/`, payload),
+  agreement:  (params)   => apiClient.get('/benchmark/cases/agreement/', { params }),
 };
 
 /* ── Experiments ── */

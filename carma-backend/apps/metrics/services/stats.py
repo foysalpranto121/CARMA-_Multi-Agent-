@@ -90,16 +90,44 @@ def mcnemar_test(pairs_a: list, pairs_b: list) -> dict:
 
     # Exact binomial: under H0 the discordant pairs split 50/50.
     p_value = float(binomtest(min(only_a, only_b), discordant, 0.5).pvalue)
-    odds_ratio = (only_a / only_b) if only_b else float('inf')
+    # The conditional odds ratio is unbounded when one discordant cell is
+    # empty — exactly when one configuration dominates — and JSON has no
+    # infinity.  The Haldane-Anscombe value (0.5 added to both cells) is
+    # always finite and is reported alongside.
+    odds_ratio = (only_a / only_b) if only_b else None
 
     return {
         'statistic': float(discordant),
         'p_value': p_value,
         'odds_ratio': odds_ratio,
+        'odds_ratio_corrected': (only_a + 0.5) / (only_b + 0.5),
         'only_a': only_a,
         'only_b': only_b,
         'n_pairs': n,
         'significant': p_value < ALPHA,
+    }
+
+
+def cohen_kappa(labels_a: list, labels_b: list) -> dict:
+    """
+    Cohen's kappa of two annotators who labelled the same items.
+
+    :returns: ``kappa`` with the observed and the chance agreement; ``kappa``
+              is ``None`` when the chance agreement is 1 (both annotators
+              used one and the same label throughout — κ is undefined then).
+    """
+    n = min(len(labels_a), len(labels_b))
+    if n == 0:
+        return {'error': 'No item was labelled by both annotators.'}
+    a, b = list(labels_a[:n]), list(labels_b[:n])
+    observed = sum(1 for x, y in zip(a, b) if x == y) / n
+    expected = sum((a.count(label) / n) * (b.count(label) / n) for label in set(a) | set(b))
+    kappa = None if expected >= 1.0 else (observed - expected) / (1.0 - expected)
+    return {
+        'kappa': kappa,
+        'observed_agreement': observed,
+        'expected_agreement': expected,
+        'n': n,
     }
 
 

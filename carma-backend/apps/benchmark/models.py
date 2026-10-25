@@ -160,3 +160,47 @@ class BenchmarkCase(models.Model):
         if self.prefix_trace:
             return self.prefix_trace
         return self.case.prefix_trace or []
+
+
+class GoldAnnotation(models.Model):
+    """
+    One annotator's reading of the reference adaptation of a benchmark case.
+
+    The automated gold of a case is checked by two annotators independently.
+    Cohen's κ over their strategy labels is the agreement the protocol
+    reports; the cases they disagree on are resolved before the main runs.
+    """
+    STRATEGY_CHOICES = [
+        ('follow_observed_path',           'Follow the observed path'),
+        ('take_observed_alternative_path', 'Take the observed alternative path'),
+        ('request_missing_document',       'Request the missing document'),
+        ('apply_valid_rule_version',       'Apply the rule version in force'),
+        ('escalate_for_approval',          'Escalate for approval'),
+        ('map_renamed_activity',           'Map the renamed activity'),
+        ('request_clarification',          'Request clarification'),
+        ('resolve_by_authority',           'Resolve by authority'),
+        ('escalate_conflict',              'Escalate the conflict'),
+        ('ignore_injection',               'Ignore the injected instruction'),
+    ]
+
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    benchmark_case = models.ForeignKey(BenchmarkCase, on_delete=models.CASCADE,
+                                       related_name='annotations')
+    annotator      = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+                                       related_name='gold_annotations')
+    strategy       = models.CharField(max_length=40, choices=STRATEGY_CHOICES)
+    activity_seq   = models.JSONField(default=list, blank=True,
+                                      help_text='The continuation the annotator considers correct')
+    agrees_with_reference = models.BooleanField(
+        default=True, help_text='The automated gold of the case is correct')
+    notes          = models.TextField(blank=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table        = 'gold_annotations'
+        unique_together = [('benchmark_case', 'annotator')]
+        ordering        = ['created_at']
+
+    def __str__(self):
+        return f'Annotation {self.strategy} on {self.benchmark_case_id} by {self.annotator_id}'

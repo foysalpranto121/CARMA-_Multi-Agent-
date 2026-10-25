@@ -33,6 +33,15 @@ class TestMcNemar:
     def test_no_data_returns_error(self):
         assert 'error' in mcnemar_test([], [])
 
+    def test_a_dominating_configuration_stays_json_serialisable(self):
+        """B4 violates wherever B7 does not: one discordant cell is empty."""
+        import json
+
+        result = mcnemar_test([1] * 20, [0] * 20)
+        assert result['odds_ratio'] is None
+        assert result['odds_ratio_corrected'] == pytest.approx(20.5 / 0.5)
+        json.dumps(result, allow_nan=False)
+
     def test_pairwise_over_configurations(self):
         rows = []
         for index in range(20):

@@ -10,13 +10,16 @@ from rest_framework.views import APIView
 
 from apps.users.permissions import IsAnnotatorOrAdmin, IsResearcherOrAdmin
 
-from .models import BenchmarkCase, BenchmarkScenario, Case, EventLog
+from apps.metrics.services.stats import cohen_kappa
+
+from .models import BenchmarkCase, BenchmarkScenario, Case, EventLog, GoldAnnotation
 from .serializers import (
     BenchmarkCaseListSerializer,
     BenchmarkCaseSerializer,
     BenchmarkScenarioSerializer,
     CaseSerializer,
     EventLogSerializer,
+    GoldAnnotationSerializer,
 )
 
 
@@ -60,7 +63,56 @@ class BenchmarkCaseViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ('update', 'partial_update', 'destroy'):
             return [IsAuthenticated(), IsAnnotatorOrAdmin()]
+        if self.action == 'annotations' and self.request.method == 'POST':
+            return [IsAuthenticated(), IsAnnotatorOrAdmin()]
         return [IsAuthenticated()]
+
+    @action(detail=True, methods=['get', 'post'])
+    def annotations(self, request, pk=None):
+        """
+        The annotations of a case.  ``POST`` records (or revises) the
+        requesting annotator's own reading of the reference.
+        """
+        benchmark_case = self.get_object()
+        if request.method == 'POST':
+            serializer = GoldAnnotationSerializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            annotation, _ = GoldAnnotation.objects.update_or_create(
+                benchmark_case=benchmark_case, annotator=request.user,
+                defaults=serializer.validated_data)
+            _record_annotators(benchmark_case)
+            return Response(GoldAnnotationSerializer(annotation).data,
+                            status=status.HTTP_201_CREATED)
+        rows = benchmark_case.annotations.select_related('annotator')
+        return Response(GoldAnnotationSerializer(rows, many=True).data)
+
+    @action(detail=False, methods=['get'])
+    def agreement(self, request):
+        """
+        Cohen's κ of the first two annotators over the strategy labels of the
+        cases both annotated (filter with ``?scenario=`` / ``?process=``).
+        """
+        queryset = self.filter_queryset(self.get_queryset()).prefetch_related('annotations')
+        labels_a, labels_b, disagreements, annotated = [], [], [], 0
+        for benchmark_case in queryset:
+            annotations = list(benchmark_case.annotations.all())
+            if annotations:
+                annotated += 1
+            if len(annotations) < 2:
+                continue
+            first, second = annotations[0], annotations[1]
+            labels_a.append(first.strategy)
+            labels_b.append(second.strategy)
+            if first.strategy != second.strategy:
+                disagreements.append(str(benchmark_case.id))
+
+        result = cohen_kappa(labels_a, labels_b)
+        result.update({
+            'annotated':        annotated,
+            'double_annotated': len(labels_a),
+            'disagreements':    disagreements,
+        })
+        return Response(result)
 
     @action(detail=False, methods=['get'])
     def stats(self, request):
@@ -73,6 +125,15 @@ class BenchmarkCaseViewSet(viewsets.ModelViewSet):
                     .order_by('scenario__code')
             ),
         })
+
+
+def _record_annotators(benchmark_case):
+    """Keep the case's two annotator slots in step with its first two annotations."""
+    annotators = [annotation.annotator
+                  for annotation in benchmark_case.annotations.select_related('annotator')[:2]]
+    benchmark_case.annotator_1 = annotators[0] if annotators else None
+    benchmark_case.annotator_2 = annotators[1] if len(annotators) > 1 else None
+    benchmark_case.save(update_fields=['annotator_1', 'annotator_2'])
 
 
 class ImportLogView(APIView):

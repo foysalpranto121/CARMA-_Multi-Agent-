@@ -40,8 +40,9 @@ class StatisticalTestsView(APIView):
     def get(self, request):
         from apps.experiments.models import Adaptation
 
+        # Only finished runs: a running, failed or retired run is no result.
         adaptations = Adaptation.objects.select_related(
-            'run__configuration', 'benchmark_case').all()
+            'run__configuration', 'benchmark_case').filter(run__status='completed')
         # A run on the test double measures the plumbing, never a model.
         if request.query_params.get('include_mock') not in ('1', 'true'):
             adaptations = adaptations.exclude(llm_backend='mock')

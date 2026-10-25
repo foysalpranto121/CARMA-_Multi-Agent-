@@ -22,6 +22,7 @@ import ExperimentDetailPage from './pages/ExperimentDetailPage';
 import MetricsPage from './pages/MetricsPage';
 import ReviewPage  from './pages/ReviewPage';
 import AuditPage   from './pages/AuditPage';
+import AnnotationPage from './pages/AnnotationPage';
 import NotFoundPage from './pages/NotFoundPage';
 
 const queryClient = new QueryClient({
@@ -94,6 +95,10 @@ export default function App() {
 
           <Route path="/audit" element={<Shell roles={['researcher']}>
             <AuditPage />
+          </Shell>} />
+
+          <Route path="/annotate" element={<Shell roles={['annotator']}>
+            <AnnotationPage />
           </Shell>} />
 
           {/* ── Catch-all ── */}
