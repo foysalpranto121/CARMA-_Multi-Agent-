@@ -13,7 +13,7 @@ The command performs the full pipeline for one or more datasets:
 
 Usage
     python manage.py import_benchmark --datasets bpi2017
-    python manage.py import_benchmark --datasets bpi2017 bpi2019 bpi2020 rtfm \
+    python manage.py import_benchmark --datasets bpi2017 bpi2020 rtfm helpdesk \
         --cases-per-scenario 30
 """
 from __future__ import annotations

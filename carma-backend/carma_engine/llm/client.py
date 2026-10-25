@@ -304,7 +304,11 @@ class LLMClient:
             message = body['choices'][0]['message']['content']
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMUnavailable('Malformed OpenAI response.') from exc
-        return message or '', body.get('usage') or {}
+        usage = dict(body.get('usage') or {})
+        # The dated snapshot that answered (e.g. gpt-4o-2024-08-06): the
+        # protocol pins model versions, so the served one is recorded.
+        usage['model'] = body.get('model') or self.model
+        return message or '', usage
 
     def _call_ollama(self, system_prompt: str, human_prompt: str) -> tuple[str, dict]:
         payload = {

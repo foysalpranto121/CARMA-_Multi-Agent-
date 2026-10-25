@@ -591,6 +591,40 @@ class TestClaudeClient:
         assert sent['model'] == 'qwen2.5:32b'
 
 
+class TestOpenAIClient:
+    def test_sends_the_protocol_sampling_and_records_the_snapshot(self, monkeypatch):
+        import io
+        import json
+
+        from carma_engine.llm.client import LLMClient
+
+        monkeypatch.setenv('OPENAI_API_KEY', 'sk-proj-test-key')
+        sent = {}
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(request, timeout=None):
+            sent.update(json.loads(request.data))
+            return Response(json.dumps({
+                'model': 'gpt-4o-2024-08-06',
+                'choices': [{'message': {'content': '{"ok": true}'}}],
+                'usage': {'prompt_tokens': 10, 'completion_tokens': 3},
+            }).encode())
+
+        monkeypatch.setattr('urllib.request.urlopen', urlopen)
+        client = LLMClient(model='gpt-4o', temperature=0.2, seed=42)
+        assert client.invoke_json('s', 'h') == {'ok': True}
+        assert sent['temperature'] == 0.2
+        assert sent['seed'] == 42
+        assert client.usage.served_by == {'gpt-4o-2024-08-06': 1}
+        assert client.usage.total_tokens == 13
+
+
 class TestRunExperimentCommand:
     def test_stops_before_the_first_case_without_credentials(self, benchmark_case,
                                                              no_credentials):

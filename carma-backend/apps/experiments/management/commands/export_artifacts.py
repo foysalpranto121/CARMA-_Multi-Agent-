@@ -373,7 +373,7 @@ run, which is the granularity the paired (McNemar / Friedman) tests need.
 
 ## Reproducing
 
-    python manage.py import_benchmark --datasets bpi2017 bpi2019 bpi2020 rtfm \\
+    python manage.py import_benchmark --datasets bpi2017 bpi2020 rtfm helpdesk \\
         --cases-per-scenario 30 --seed 42
     python manage.py seed_configurations
     python manage.py run_experiment --configs B0 B1 B2 B3 B4 B5 B6 B7 --seed 42

@@ -15,6 +15,7 @@ class EventLog(models.Model):
         ('bpi2019', 'BPI Challenge 2019'),
         ('bpi2020', 'BPI Challenge 2020'),
         ('rtfm',    'Road Traffic Fine Management'),
+        ('helpdesk', 'Helpdesk (IT service tickets)'),
     ]
 
     id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

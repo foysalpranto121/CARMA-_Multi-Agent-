@@ -53,6 +53,8 @@ data/*.zip
 data/*.csv
 # partial downloads left behind by an interrupted fetch
 data/*.download
+# event logs downloaded by hand
+dataset/
 
 # IDE
 .vscode/

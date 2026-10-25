@@ -134,6 +134,27 @@ SUPPORTED_LOGS: dict[str, LogSpec] = {
                              'Appeal Judge'),
         payment_activities=('Pay Fine', 'Payment', 'Add Payment'),
     ),
+    # The light replacement for BPI 2019 (about 700 MB): 14 MB, 4,580 tickets.
+    # Source: Polato, M. (2017) "Dataset belonging to the help desk log of an
+    # Italian company", Mendeley Data, doi:10.17632/39bp3vv62t.1; the XES is
+    # the conversion shipped with pm4py (tests/input_data/helpdesk.xes.gz).
+    'helpdesk': LogSpec(
+        key='helpdesk',
+        display_name='Helpdesk — IT Service Tickets',
+        domain='IT service management',
+        filename='Helpdesk.xes',
+        description=(
+            'Real-life event log of the ticketing system of the help desk of an '
+            'Italian software company: every ticket from its insertion to its '
+            'closure, 2010-2014.'
+        ),
+        case_attributes=('seriousness', 'service_level', 'service_type',
+                         'product', 'customer'),
+        document_activities=('Insert ticket', 'Create SW anomaly'),
+        # The steps after which the ticket can still go several ways.
+        decision_activities=('Assign seriousness', 'Take in charge ticket', 'Wait'),
+        payment_activities=(),
+    ),
 }
 
 
@@ -148,13 +169,34 @@ class ImportedCase:
     split: str = 'train'
 
 
+#: Logs downloaded by hand go here; this folder is searched before ``data``.
+DOWNLOAD_DATA_DIR = os.path.join(os.path.dirname(DEFAULT_DATA_DIR), 'dataset')
+
+
+def data_dirs() -> list[str]:
+    """
+    The folders the raw event logs are looked up in, in order:
+    ``CARMA_DATA_DIR`` (environment or ``.env``), ``dataset``, ``data``.
+    """
+    try:
+        from decouple import config  # noqa: PLC0415
+        configured = config('CARMA_DATA_DIR', default='')
+    except ImportError:  # pragma: no cover - python-decouple is a core requirement
+        configured = os.environ.get('CARMA_DATA_DIR', '')
+    return ([configured] if configured else []) + [DOWNLOAD_DATA_DIR, DEFAULT_DATA_DIR]
+
+
 def data_dir() -> str:
-    return os.environ.get('CARMA_DATA_DIR', DEFAULT_DATA_DIR)
+    return data_dirs()[0]
 
 
 def log_path(dataset_key: str) -> str:
-    """Absolute path of the XES file backing ``dataset_key``."""
+    """Absolute path of the XES file backing ``dataset_key`` (the first folder that has it)."""
     spec = SUPPORTED_LOGS[dataset_key]
+    for directory in data_dirs():
+        path = os.path.join(directory, spec.filename)
+        if os.path.exists(path):
+            return path
     return os.path.join(data_dir(), spec.filename)
 
 
