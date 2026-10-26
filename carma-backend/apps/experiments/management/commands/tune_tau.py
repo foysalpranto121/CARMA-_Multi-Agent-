@@ -55,11 +55,14 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--config', default='B7')
+        parser.add_argument('--model', required=True,
+                            help='LLM to tune for: tau is calibrated on its confidences.')
         parser.add_argument('--seed', type=int, default=42)
         parser.add_argument('--output', default='../artifacts/tuning')
 
     def handle(self, *args, **options):
-        configuration = RunConfiguration.objects.filter(code=options['config']).first()
+        configuration = RunConfiguration.objects.filter(
+            code=options['config'], llm_model=options['model']).first()
         if configuration is None:
             raise CommandError(f'Configuration {options["config"]} does not exist.')
         cases = list(BenchmarkCase.objects.filter(is_validated=True, split='pilot')
@@ -95,10 +98,12 @@ class Command(BaseCommand):
             self.stdout.write(f"  tau={result['tau']:.1f}  task success "
                               f"{result['task_success_rate']:.3f}  escalation "
                               f"{result['escalation_rate']:.3f}{marker}")
-        RunConfiguration.objects.update(tau_threshold=best['tau'])
+        RunConfiguration.objects.filter(llm_model=options['model']).update(
+            tau_threshold=best['tau'])
 
         os.makedirs(options['output'], exist_ok=True)
-        path = os.path.join(options['output'], 'tau.json')
+        path = os.path.join(options['output'],
+                            f"tau_{options['model'].replace('/', '_')}.json")
         with open(path, 'w', encoding='utf-8') as handle:
             json.dump({'run_id': str(run.id), 'configuration': configuration.code,
                        'pilot_cases': len(rows), 'grid': results, 'chosen_tau': best['tau'],

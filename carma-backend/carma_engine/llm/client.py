@@ -36,6 +36,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -52,6 +53,13 @@ DEFAULT_MODEL = 'claude-opus-5-5'
 CLAUDE_MODELS = ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5')
 OPENAI_MODELS = ('gpt-4o', 'gpt-4o-mini')
 OLLAMA_MODELS = ('llama3.1-70b', 'llama3.1-8b', 'mistral-7b', 'qwen2.5-32b')
+# Open-weight models on Groq's free, rate-limited tier (OpenAI-compatible API).
+GROQ_MODELS = ('openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3.8-27b')
+GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
+# A free tier throttles; a throttled call waits and is retried, it is not a failure.
+RETRY_STATUSES = (429, 500, 502, 503, 504)
+MAX_ATTEMPTS = 8
+MAX_RATE_LIMIT_WAITS = 2000
 
 # The configuration stores dash-separated model ids; Ollama names its
 # models ``family:size``.
@@ -150,6 +158,7 @@ class LLMClient:
     def __post_init__(self):
         self._api_key = _env('OPENAI_API_KEY').strip()
         self._anthropic_key = _env('ANTHROPIC_API_KEY').strip()
+        self._groq_key = _env('GROQ_API_KEY').strip()
         self._ollama_base = _env('OLLAMA_BASE_URL', 'http://localhost:11434').rstrip('/')
         self._openai_base = _env('OPENAI_BASE_URL', 'https://api.openai.com/v1').rstrip('/')
         self.effort = self.effort or _env('ANTHROPIC_EFFORT', 'medium')
@@ -159,19 +168,23 @@ class LLMClient:
     def provider(self) -> str:
         if self.model.startswith('claude-'):
             return 'anthropic'
+        if self.model in GROQ_MODELS:
+            return 'groq'
         return 'ollama' if self.model in OLLAMA_MODELS else 'openai'
 
     def available(self) -> bool:
         """True when the configured model can actually be reached."""
         if self.provider == 'anthropic':
             return not _is_placeholder(self._anthropic_key)
+        if self.provider == 'groq':
+            return not _is_placeholder(self._groq_key)
         if self.provider == 'ollama':
             return bool(self._ollama_base)
         return not _is_placeholder(self._api_key)
 
     def _require(self):
         if not self.available():
-            setting = {'anthropic': 'ANTHROPIC_API_KEY',
+            setting = {'anthropic': 'ANTHROPIC_API_KEY', 'groq': 'GROQ_API_KEY',
                        'ollama': 'OLLAMA_BASE_URL'}.get(self.provider, 'OPENAI_API_KEY')
             raise LLMUnavailable(
                 f'No LLM endpoint available for model "{self.model}". '
@@ -283,22 +296,34 @@ class LLMClient:
         }
         if self.seed is not None:
             payload['seed'] = self.seed
+        groq = self.provider == 'groq'
         request = urllib.request.Request(
-            f'{self._openai_base}/chat/completions',
+            f'{GROQ_BASE_URL if groq else self._openai_base}/chat/completions',
             data=json.dumps(payload).encode('utf-8'),
             headers={
                 'Content-Type': 'application/json',
-                'Authorization': f'Bearer {self._api_key}',
+                'Authorization': f'Bearer {self._groq_key if groq else self._api_key}',
+                # Python's default urllib agent is refused by some API front-ends.
+                'User-Agent': 'carma-research/1.0',
             },
             method='POST',
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode('utf-8'))
-        except urllib.error.HTTPError as exc:
-            raise LLMUnavailable(f'OpenAI request failed: {exc}') from exc
-        except urllib.error.URLError as exc:
-            raise LLMUnavailable(f'OpenAI endpoint unreachable: {exc}') from exc
+        for attempt in range(1, MAX_RATE_LIMIT_WAITS + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    body = json.loads(response.read().decode('utf-8'))
+                break
+            except urllib.error.HTTPError as exc:
+                # A rate limit (429) waits as long as the provider asks, which
+                # covers a daily quota; other transient errors get MAX_ATTEMPTS.
+                exhausted = attempt >= (MAX_RATE_LIMIT_WAITS if exc.code == 429 else MAX_ATTEMPTS)
+                if exc.code not in RETRY_STATUSES or exhausted:
+                    raise LLMUnavailable(f'{self.provider} request failed: {exc}') from exc
+                wait = float(exc.headers.get('retry-after') or 0) or min(60.0, 2.0 ** attempt)
+                log.info('%s returned %s; retrying in %.0fs.', self.provider, exc.code, wait)
+                time.sleep(wait)
+            except urllib.error.URLError as exc:
+                raise LLMUnavailable(f'{self.provider} endpoint unreachable: {exc}') from exc
 
         try:
             message = body['choices'][0]['message']['content']

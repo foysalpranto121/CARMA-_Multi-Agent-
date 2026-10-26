@@ -58,12 +58,13 @@ class Command(BaseCommand):
                 'use_graph_rag': runner_class.retrieval_type == 'graph',
                 'multi_agent': runner_class.multi_agent,
                 'num_agents': runner_class.num_agents,
-                'llm_model': options['llm'],
                 'temperature': options['temperature'],
                 'max_tokens': options['max_tokens'],
             }
+            # One configuration row per (code, model): a run must keep the
+            # model it ran with when another model is seeded later.
             config, was_created = RunConfiguration.objects.update_or_create(
-                code=code, defaults=defaults)
+                code=code, llm_model=options['llm'], defaults=defaults)
             if was_created:
                 created += 1
                 self.stdout.write(self.style.SUCCESS(f'created {code}: {config.name}'))

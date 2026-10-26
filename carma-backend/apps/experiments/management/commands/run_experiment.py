@@ -51,6 +51,8 @@ class Command(BaseCommand):
                             help='Process id or name to run, or "all".')
         parser.add_argument('--limit', type=int, default=0,
                             help='Only run the first N benchmark cases (0 = all).')
+        parser.add_argument('--model', default='',
+                            help='LLM of the configurations to run (their llm_model).')
         parser.add_argument('--split', choices=['eval', 'pilot'], default='eval',
                             help='Benchmark split: eval (the study) or pilot (tuning only).')
         parser.add_argument('--per-scenario', type=int, default=0,
@@ -67,6 +69,7 @@ class Command(BaseCommand):
             if code not in {f'B{i}' for i in range(8)}:
                 raise CommandError(f'Unknown configuration "{code}".')
 
+        self.model = options.get('model') or ''
         configuration = self._configuration(codes[0])
         cases = self._cases(options)
         if not cases:
@@ -95,7 +98,10 @@ class Command(BaseCommand):
 
     # ── helpers ────────────────────────────────────────────────
     def _configuration(self, code: str) -> RunConfiguration:
-        configuration = RunConfiguration.objects.filter(code=code).first()
+        queryset = RunConfiguration.objects.filter(code=code)
+        if getattr(self, 'model', ''):
+            queryset = queryset.filter(llm_model=self.model)
+        configuration = queryset.order_by('created_at').first()
         if configuration is None:
             raise CommandError(
                 f'Configuration {code} does not exist. Run '

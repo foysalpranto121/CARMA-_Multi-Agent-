@@ -1,0 +1,6 @@
+== 2026-10-26 10:55:39 seed configurations
+Done — 8 created, 0 updated, 16 configurations in total.
+Done — 8 created, 0 updated, 24 configurations in total.
+== 2026-10-26 10:55:54 tune tau for openai/gpt-oss-120b
+Running B7 on 84 pilot cases …
+WARNING 2026-10-26 10:58:20,736 client 31060 35208 Could not decode JSON from model output; using default.

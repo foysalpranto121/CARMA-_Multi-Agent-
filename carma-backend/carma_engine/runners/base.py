@@ -477,7 +477,7 @@ class BaseRunner:
             if count - before['served_by'].get(model, 0) > 0
         }
         outcome.llm_backend = getattr(llm, 'provider', '') or ''
-        if outcome.llm_backend in ('anthropic', 'mock'):
+        if outcome.llm_backend in ('anthropic', 'groq', 'mock'):
             outcome.usd_cost = round(after['usd'] - before['usd'], 6)
 
 

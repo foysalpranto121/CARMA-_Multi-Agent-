@@ -55,6 +55,12 @@ class StatisticalTestsView(APIView):
         configuration = request.query_params.get('configuration')
         if configuration:
             adaptations = adaptations.filter(run__configuration__code=configuration)
+        model = request.query_params.get('model')
+        if model:
+            # B0 uses no LLM, so it belongs to every model's comparison.
+            from django.db.models import Q  # noqa: PLC0415
+            adaptations = adaptations.filter(
+                Q(run__configuration__llm_model=model) | Q(run__configuration__code='B0'))
 
         rows = []
         latency_samples: dict[str, list] = {}
