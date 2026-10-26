@@ -56,6 +56,10 @@ OLLAMA_MODELS = ('llama3.1-70b', 'llama3.1-8b', 'mistral-7b', 'qwen2.5-32b')
 # Open-weight models on Groq's free, rate-limited tier (OpenAI-compatible API).
 GROQ_MODELS = ('openai/gpt-oss-20b', 'openai/gpt-oss-120b', 'qwen/qwen3.8-27b')
 GROQ_BASE_URL = 'https://api.groq.com/openai/v1'
+# Reasoning models whose hidden reasoning length is set per request.  The
+# reasoning tokens count against the free tier's daily token quota.
+REASONING_MODELS = ('openai/gpt-oss-20b', 'openai/gpt-oss-120b')
+REASONING_EFFORTS = ('low', 'medium', 'high')
 # A free tier throttles; a throttled call waits and is retried, it is not a failure.
 RETRY_STATUSES = (429, 500, 502, 503, 504)
 MAX_ATTEMPTS = 8
@@ -144,6 +148,8 @@ class LLMClient:
     :param seed:        optional seed forwarded to the provider (not sent to Claude)
     :param effort:      Claude ``output_config.effort``; defaults to
                         ``ANTHROPIC_EFFORT`` or ``medium``
+    :param reasoning_effort: ``reasoning_effort`` of a :data:`REASONING_MODELS`
+                        model; empty sends none (the provider default)
     """
 
     model: str = DEFAULT_MODEL
@@ -152,6 +158,7 @@ class LLMClient:
     seed: int | None = None
     timeout: int = DEFAULT_TIMEOUT
     effort: str = ''
+    reasoning_effort: str = ''
     usage: Usage = field(default_factory=Usage)
 
     # ── configuration helpers ──────────────────────────────────
@@ -296,6 +303,8 @@ class LLMClient:
         }
         if self.seed is not None:
             payload['seed'] = self.seed
+        if self.reasoning_effort and self.model in REASONING_MODELS:
+            payload['reasoning_effort'] = self.reasoning_effort
         groq = self.provider == 'groq'
         request = urllib.request.Request(
             f'{GROQ_BASE_URL if groq else self._openai_base}/chat/completions',
@@ -403,6 +412,8 @@ def parse_json_object(raw: str, default: dict) -> dict:
 
 
 def build_llm(model: str = DEFAULT_MODEL, temperature: float = 0.0,
-               max_tokens: int = 4096, seed: int | None = None) -> LLMClient:
+               max_tokens: int = 4096, seed: int | None = None,
+               reasoning_effort: str = '') -> LLMClient:
     """Factory used by the runners."""
-    return LLMClient(model=model, temperature=temperature, max_tokens=max_tokens, seed=seed)
+    return LLMClient(model=model, temperature=temperature, max_tokens=max_tokens, seed=seed,
+                     reasoning_effort=reasoning_effort)

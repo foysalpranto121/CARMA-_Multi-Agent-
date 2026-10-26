@@ -1,0 +1,4 @@
+== 2026-10-26 11:22:50 study for openai/gpt-oss-120b, seed 42
+== 2026-10-26 11:22:50 tune_tau --config B7 --model openai/gpt-oss-120b --seed 42
+== 2026-10-26 11:47:46 study for openai/gpt-oss-120b, seed 42
+== 2026-10-26 11:47:47 tune_tau --config B7 --model openai/gpt-oss-120b --seed 42

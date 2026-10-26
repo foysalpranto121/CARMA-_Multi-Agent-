@@ -10,10 +10,15 @@ time and the artefacts are exported afterwards.
 Usage
 -----
     python manage.py run_experiment --configs B0 --seed 42
-    python manage.py run_experiment --configs B0 B1 B2 B3 B4 B5 B6 B7 \
-        --seed 42 --process all
+    python manage.py run_experiment --configs B4 B5 B6 B7 --model openai/gpt-oss-120b \
+        --seed 42 --per-scenario 28                     # the confirmatory sample
+    python manage.py run_experiment ... --resume        # continue a paused run
     python manage.py run_experiment --configs B1 --mock-llm --limit 20
-    python manage.py run_experiment --configs B4 B7 --per-scenario 4   # 28-case pilot
+
+The configurations run case-major (every configuration runs a case before
+the next case starts) and each case is stored as soon as it ends; see
+:mod:`apps.experiments.execution`.  When the model becomes unreachable the
+runs are paused; the same command with ``--resume`` continues them.
 
 The ``--mock-llm`` flag substitutes the deterministic test double of
 :mod:`carma_engine.llm.mock`.  It exercises the pipeline without a model
@@ -21,20 +26,19 @@ endpoint; a run that used it is recorded with ``llm_backend = "mock"`` and
 its results are *not* model results.
 
 Without ``--mock-llm`` a configuration whose model cannot be reached (for
-Claude: no ``ANTHROPIC_API_KEY`` in ``carma-backend/.env``) stops before its
+Groq: no ``GROQ_API_KEY`` in ``carma-backend/.env``) stops before its
 first case.
 """
 from __future__ import annotations
 
 import time
 
+from decouple import config
 from django.core.management.base import BaseCommand, CommandError
-from django.db import transaction
-from django.utils import timezone
 
 from apps.benchmark.models import BenchmarkCase
+from apps.experiments.execution import RunInterrupted, execute, open_run
 from apps.experiments.models import Adaptation, ExperimentRun, RunConfiguration, RunResult
-from apps.experiments.tasks import _push_progress, aggregate_results, persist_outcome
 from carma_engine.llm.client import LLMUnavailable
 from carma_engine.runners import get_runner
 
@@ -60,6 +64,10 @@ class Command(BaseCommand):
                                  'turn from each process (0 = all).')
         parser.add_argument('--mock-llm', action='store_true',
                             help='Use the deterministic test double instead of a model.')
+        parser.add_argument('--resume', action='store_true',
+                            help='Continue the unfinished run of each configuration and '
+                                 'seed over the same cases (a finished one is kept) '
+                                 'instead of starting a new one.')
         parser.add_argument('--reset', action='store_true',
                             help='Delete the earlier runs of the same configuration and seed.')
 
@@ -70,31 +78,58 @@ class Command(BaseCommand):
                 raise CommandError(f'Unknown configuration "{code}".')
 
         self.model = options.get('model') or ''
-        configuration = self._configuration(codes[0])
         cases = self._cases(options)
         if not cases:
             raise CommandError('No benchmark cases match the selection.')
+        seed = int(options['seed'])
         self.stdout.write(
-            f'Running {len(codes)} configuration(s) over {len(cases)} cases '
-            f'(seed {options["seed"]}).'
-        )
+            f'Running {len(codes)} configuration(s) over {len(cases)} cases (seed {seed}).')
 
         llm = None
         if options['mock_llm']:
             from carma_engine.llm.mock import MockLLM
 
-            llm = MockLLM(seed=options['seed'])
+            llm = MockLLM(seed=seed)
 
-        configurations = [self._configuration(code) for code in codes]
-        for configuration in configurations:
+        jobs = []
+        for code in codes:
+            configuration = self._configuration(code)
+            runner = get_runner(configuration.code, config=configuration, seed=seed, llm=llm)
             try:
-                get_runner(configuration.code, config=configuration,
-                           seed=options['seed'], llm=llm).check_llm()
+                runner.check_llm()
             except LLMUnavailable as exc:
                 raise CommandError(f'{configuration.code}: {exc}') from exc
+            jobs.append((None, runner, configuration))
 
-        for configuration in configurations:
-            self._run_configuration(configuration, cases, options, llm)
+        # The protocol is registered before any model sees an evaluation case.
+        registration = str(config('PREREGISTRATION_URL', default='')).strip()
+        if (options.get('split') or 'eval') == 'eval' and not options['mock_llm'] \
+                and not registration and any(runner.uses_llm for _, runner, _ in jobs):
+            raise CommandError(
+                'The evaluation split runs only after the study is registered: set '
+                'PREREGISTRATION_URL in carma-backend/.env to the OSF registration. '
+                'Meanwhile use --split pilot or --mock-llm.')
+
+        for index, (_, runner, configuration) in enumerate(jobs):
+            if options['reset']:
+                previous = ExperimentRun.objects.filter(configuration=configuration, seed=seed)
+                Adaptation.objects.filter(run__in=previous).delete()
+                RunResult.objects.filter(run__in=previous).delete()
+                previous.delete()
+            run = open_run(configuration, seed, cases, resume=options['resume'],
+                           note=f'preregistration {registration}' if registration else '')
+            jobs[index] = (run, runner, configuration)
+            self.stdout.write(f'  {configuration.code}: run {run.id}')
+
+        started = time.monotonic()
+        try:
+            execute(jobs, cases, progress=self.stdout.write)
+        except RunInterrupted as exc:
+            raise CommandError(f'Paused, the outcomes so far are kept ({exc}). '
+                               'Run the same command with --resume to continue.') from exc
+        self.stdout.write(f'Done in {time.monotonic() - started:.0f}s.')
+        for run, _, configuration in jobs:
+            self._report(run, configuration)
 
     # ── helpers ────────────────────────────────────────────────
     def _configuration(self, code: str) -> RunConfiguration:
@@ -124,63 +159,11 @@ class Command(BaseCommand):
         limit = int(options['limit'] or 0)
         return list(queryset[:limit] if limit else queryset)
 
-    def _run_configuration(self, configuration, cases, options, llm):
-        seed = int(options['seed'])
-        if options['reset']:
-            previous = ExperimentRun.objects.filter(configuration=configuration, seed=seed)
-            Adaptation.objects.filter(run__in=previous).delete()
-            RunResult.objects.filter(run__in=previous).delete()
-            previous.delete()
-        # Every invocation is its own run: appending to an earlier run of the
-        # same configuration would mix two executions in one result.
-        run = ExperimentRun.objects.create(
-            configuration=configuration,
-            process=cases[0].process if len({c.process_id for c in cases}) == 1 else None,
-            seed=seed,
-            status='running',
-            started_at=timezone.now(),
-            total_cases=len(cases),
-        )
-
-        runner = get_runner(configuration.code, config=configuration, seed=seed, llm=llm)
-        started = time.monotonic()
-        completed = 0
-        failed = 0
-
-        for benchmark_case in cases:
-            try:
-                output = runner.run(benchmark_case, configuration)
-            except Exception as exc:  # pragma: no cover - defensive
-                failed += 1
-                self.stderr.write(f'  {benchmark_case.id}: {exc}')
-                continue
-
-            status = output.get('status') or 'failed'
-            if status == 'failed':
-                failed += 1
-                self.stderr.write(f'  {benchmark_case.id}: {output.get("error", "")}')
-            else:
-                completed += 1
-            with transaction.atomic():
-                persist_outcome(run, benchmark_case, output)
-            _push_progress(run.id, len(cases), completed + failed, 'running')
-            if (completed + failed) % 10 == 0:
-                self.stdout.write(f'  {completed + failed}/{len(cases)} cases …')
-
-        run.completed_cases = completed
-        run.failed_cases = failed
-        run.save(update_fields=['completed_cases', 'failed_cases'])
-
-        # The Celery chord callback does the aggregation; the same function
-        # is used here so that both paths produce identical numbers.
-        aggregate_results.apply(args=[[], str(run.id)])
-
+    def _report(self, run, configuration):
+        run.refresh_from_db()
+        self.stdout.write(f'{configuration.code}: {run.completed_cases} completed, '
+                          f'{run.failed_cases} failed')
         result = RunResult.objects.filter(run=run).first()
-        elapsed = time.monotonic() - started
-        self.stdout.write(
-            f'{configuration.code}: {completed} completed, {failed} failed in '
-            f'{elapsed:.0f}s'
-        )
         if result:
             self.stdout.write(
                 f'   task success {result.task_success_rate!r} | '

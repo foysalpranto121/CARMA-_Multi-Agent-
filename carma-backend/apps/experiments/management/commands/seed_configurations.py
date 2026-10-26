@@ -45,6 +45,8 @@ class Command(BaseCommand):
                             help='Default LLM model for the configurations.')
         parser.add_argument('--temperature', type=float, default=0.0)
         parser.add_argument('--max-tokens', type=int, default=4096)
+        parser.add_argument('--reasoning-effort', default='', choices=['', 'low', 'medium', 'high'],
+                            help='Reasoning effort of a reasoning model (gpt-oss).')
 
     def handle(self, *args, **options):
         created, updated = 0, 0
@@ -60,6 +62,7 @@ class Command(BaseCommand):
                 'num_agents': runner_class.num_agents,
                 'temperature': options['temperature'],
                 'max_tokens': options['max_tokens'],
+                'reasoning_effort': options['reasoning_effort'],
             }
             # One configuration row per (code, model): a run must keep the
             # model it ran with when another model is seeded later.

@@ -164,7 +164,7 @@ the platform never records a rule-based plan under an LLM configuration.
 
 ```powershell
 cd carma-backend
-.\venv\Scripts\python.exe -m pytest      # 78 tests
+.\venv\Scripts\python.exe -m pytest      # 89 tests
 .\venv\Scripts\python.exe manage.py check
 .\venv\Scripts\python.exe manage.py makemigrations --check
 ```
@@ -248,18 +248,50 @@ corpus with BGE into Qdrant — rerun it whenever the corpus is rebuilt.
     --configs B0 B1 B2 B3 B4 B5 B6 B7 --seed 42
 
 # tune the escalation threshold tau on the pilot split (3 extra cases per scenario
-# and log, never evaluated) — the only tuned hyper-parameter
-.\venv\Scripts\python.exe manage.py tune_tau --config B7 --seed 42
+# and log, never evaluated) — the only tuned hyper-parameter, tuned per model
+.\venv\Scripts\python.exe manage.py tune_tau --config B7 --model openai/gpt-oss-120b --seed 42
 
-# the Day-3 pilot: B4 vs B7, 4 cases of every scenario (28 cases)
-.\venv\Scripts\python.exe manage.py run_experiment --configs B4 B7 --per-scenario 4 --seed 42
+# the confirmatory sample: 7 cases of every log x scenario cell (196 cases)
+.\venv\Scripts\python.exe manage.py run_experiment --configs B4 B5 B6 B7 `
+    --model openai/gpt-oss-120b --seed 42 --per-scenario 28
 
 # pipeline validation without a model endpoint (tagged "mock", excluded from statistics)
 .\venv\Scripts\python.exe manage.py run_experiment --configs B1 --mock-llm --limit 50
 ```
 
-Every invocation records a new run; `--reset` deletes the earlier runs of the
-same configuration and seed.
+The configurations of one invocation run case-major (each configuration runs a
+case before the next case starts) and every case is stored as soon as it ends.
+When the model becomes unreachable the runs are **paused**, not scored; the same
+command with `--resume` continues them, and resuming a finished run keeps it.
+Without `--resume` every invocation records a new run; `--reset` deletes the
+earlier runs of the same configuration and seed.
+
+### The registered study on the free tier
+
+The study uses two open-weight models on Groq's free tier (`GROQ_API_KEY` in
+`carma-backend/.env`, free at console.groq.com): `openai/gpt-oss-20b` and
+`openai/gpt-oss-120b`, each with its own quota of 200 000 tokens a day.
+Seed their configurations once, with low reasoning effort (reasoning tokens
+count against the quota):
+
+```powershell
+foreach ($m in 'openai/gpt-oss-120b', 'openai/gpt-oss-20b') {
+  .\venv\Scripts\python.exe manage.py seed_configurations --llm $m --temperature 0.2 --reasoning-effort low
+}
+```
+
+Then run one study per model, in parallel (Git Bash, from the repository root):
+
+```bash
+bash scripts/run_study.sh openai/gpt-oss-120b
+bash scripts/run_study.sh openai/gpt-oss-20b
+```
+
+The script tunes τ, then runs B4–B7 (confirmatory) and B1–B3 (secondary) on
+the 196 confirmatory cases, retrying every 10 minutes after an outage. It
+resumes, so re-launch it after a reboot; progress is in
+`artifacts/study_<model>_seed42.log`. At ≈ 13 cases of B4–B7 a day per model
+the study takes about three weeks; keep the machine awake and Docker running.
 
 ### How an adaptation is scored
 
@@ -341,14 +373,15 @@ Public self-registration cannot create an `admin` account — the API rejects it
   imported lazily. Without them the engine falls back to deterministic, hash-based
   retrieval and a rule-based agent pipeline, so the platform still runs end-to-end.
 * Without a reachable LLM provider the LLM-backed runners (B1–B7) refuse to run:
-  `run_experiment` and the Celery task stop before the first case, and a case
-  whose call fails mid-run is recorded as `failed` — never as a rule-based plan.
+  `run_experiment` and the Celery task stop before the first case. When the model
+  becomes unreachable mid-run, `run_experiment` pauses the run (resume it with
+  `--resume`); the Celery task records the case as `failed` — never as a rule-based plan.
 * Gold adaptations are produced automatically and checked by two annotators on
   the **Annotate** page (role `annotator`); Cohen's κ over their strategy labels
   is at `/api/v1/benchmark/cases/agreement/`.
-* The full study (840 cases × 8 configurations × 3 models × 3 seeds) is a multi-day
-  compute job. Validate the pipeline first with a small slice, e.g. B4 vs B7,
-  one model, one seed, 30 cases.
+* On the free tier the study is a multi-week job (see *The registered study on the
+  free tier*). Validate the pipeline first with a small slice, e.g. B4 vs B7,
+  one model, one seed, `--per-scenario 4`.
 * `statsmodels` (mixed-effects models) and `declare4py` (reference automata checker) are
   not required to run the platform — install them with
   `pip install -r requirements-optional.txt` when the corresponding analysis needs them.

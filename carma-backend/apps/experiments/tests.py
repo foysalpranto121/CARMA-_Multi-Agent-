@@ -506,6 +506,24 @@ class TestFactorialGating:
         output = self._run('B1', scored_case, ['approve_loan'])
         assert output['llm_calls'] == 1
 
+    def test_a_repair_round_keeps_the_coordinators_framing(self, scored_case):
+        from carma_engine.runners import get_runner
+
+        class Recording(ScriptedLLM):
+            framings = 0
+
+            def invoke_json(self, system_prompt, human_prompt, default=None):
+                if system_prompt.startswith('You are the coordinator'):
+                    Recording.framings += 1
+                return super().invoke_json(system_prompt, human_prompt, default)
+
+        config = RunConfiguration.objects.create(
+            code='B6', name='B6', llm_model='claude-opus-5-5', k_repair_rounds=2)
+        output = get_runner('B6', config=config, seed=42,
+                            llm=Recording(['reject_loan'])).run(scored_case, config)
+        assert output['repair_rounds'] == 2
+        assert Recording.framings == 1
+
 
 class TestClaudeClient:
     @staticmethod
@@ -660,6 +678,34 @@ class TestOpenAIClient:
         assert client.usage.served_by == {'gpt-4o-2024-08-06': 1}
         assert client.usage.total_tokens == 13
 
+    def test_sends_the_reasoning_effort_to_reasoning_models_only(self, monkeypatch):
+        import io
+        import json
+
+        from carma_engine.llm.client import LLMClient
+
+        monkeypatch.setenv('OPENAI_API_KEY', 'sk-proj-test-key')
+        monkeypatch.setenv('GROQ_API_KEY', 'gsk-test-key')
+        sent = []
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        def urlopen(request, timeout=None):
+            sent.append(json.loads(request.data))
+            return Response(json.dumps({
+                'choices': [{'message': {'content': '{}'}}], 'usage': {}}).encode())
+
+        monkeypatch.setattr('urllib.request.urlopen', urlopen)
+        LLMClient(model='openai/gpt-oss-20b', reasoning_effort='low').invoke('s', 'h')
+        LLMClient(model='gpt-4o', reasoning_effort='low').invoke('s', 'h')
+        assert sent[0]['reasoning_effort'] == 'low'
+        assert 'reasoning_effort' not in sent[1]
+
 
 class TestRunExperimentCommand:
     def test_stops_before_the_first_case_without_credentials(self, benchmark_case,
@@ -688,3 +734,94 @@ class TestRunExperimentCommand:
         adaptation = Adaptation.objects.get()
         assert adaptation.llm_backend == 'mock'
         assert AuditLogEntry.objects.filter(adaptation_id=adaptation.id).count() >= 3
+
+    def test_the_evaluation_split_waits_for_the_registration(self, benchmark_case,
+                                                             monkeypatch):
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-ant-test-key')
+        monkeypatch.setenv('PREREGISTRATION_URL', '')
+        call_command('seed_configurations', stdout=StringIO())
+        with pytest.raises(CommandError, match='PREREGISTRATION_URL'):
+            call_command('run_experiment', '--configs', 'B7',
+                         stdout=StringIO(), stderr=StringIO())
+        assert not ExperimentRun.objects.exists()
+
+    def test_an_outage_pauses_the_run_and_resume_completes_it(self, benchmark_case,
+                                                             monkeypatch):
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        from carma_engine.llm.client import LLMUnavailable
+        from carma_engine.llm.mock import MockLLM
+
+        second = Case.objects.create(event_log=benchmark_case.case.event_log,
+                                     case_id='case-2', prefix_trace=PREFIX)
+        BenchmarkCase.objects.create(
+            case=second, scenario=benchmark_case.scenario, process=benchmark_case.process,
+            constraint_set=benchmark_case.constraint_set,
+            perturbation=benchmark_case.perturbation, gold_adaptation={'activities': []},
+            is_validated=True)
+        answer = MockLLM.invoke_json
+        calls = {'n': 0}
+
+        def flaky(self, system_prompt, human_prompt, default=None):
+            calls['n'] += 1
+            if calls['n'] > 1:  # B1 makes one call per case: the second case hits the outage
+                raise LLMUnavailable('groq endpoint unreachable')
+            return answer(self, system_prompt, human_prompt, default)
+
+        call_command('seed_configurations', stdout=StringIO())
+        monkeypatch.setattr(MockLLM, 'invoke_json', flaky)
+        with pytest.raises(CommandError, match='--resume'):
+            call_command('run_experiment', '--configs', 'B1', '--mock-llm',
+                         stdout=StringIO(), stderr=StringIO())
+        run = ExperimentRun.objects.get()
+        assert run.status == 'paused'
+        assert Adaptation.objects.filter(run=run).count() == 1  # the outage is not scored
+
+        monkeypatch.setattr(MockLLM, 'invoke_json', answer)
+        call_command('run_experiment', '--configs', 'B1', '--mock-llm', '--resume',
+                     stdout=StringIO(), stderr=StringIO())
+        run = ExperimentRun.objects.get()
+        assert run.status == 'completed'
+        assert Adaptation.objects.filter(run=run).count() == 2
+        assert run.failed_cases == 0
+
+        # Resuming a finished run keeps it: a re-launched study never repeats a run.
+        call_command('run_experiment', '--configs', 'B1', '--mock-llm', '--resume',
+                     stdout=StringIO(), stderr=StringIO())
+        assert ExperimentRun.objects.count() == 1
+        assert Adaptation.objects.count() == 2
+
+    def test_configurations_run_case_major(self, benchmark_case, monkeypatch):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from carma_engine.runners.base import BaseRunner
+
+        order = []
+        run = BaseRunner.run
+
+        def recording(self, case, config=None):
+            order.append(self.code)
+            return run(self, case, config)
+
+        monkeypatch.setattr(BaseRunner, 'run', recording)
+        second = Case.objects.create(event_log=benchmark_case.case.event_log,
+                                     case_id='case-2', prefix_trace=PREFIX)
+        BenchmarkCase.objects.create(
+            case=second, scenario=benchmark_case.scenario, process=benchmark_case.process,
+            constraint_set=benchmark_case.constraint_set,
+            perturbation=benchmark_case.perturbation, gold_adaptation={'activities': []},
+            is_validated=True)
+        call_command('seed_configurations', stdout=StringIO())
+        call_command('run_experiment', '--configs', 'B1', 'B4', '--mock-llm',
+                     stdout=StringIO(), stderr=StringIO())
+        assert order == ['B1', 'B4', 'B1', 'B4']

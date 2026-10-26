@@ -36,7 +36,8 @@ class B0RuleBasedRunner(BaseRunner):
     num_agents = 0
     uses_llm = False
 
-    def plan_case(self, benchmark_case, state, constraint_graph, evidence, feedback=None):
+    def plan_case(self, benchmark_case, state, constraint_graph, evidence, feedback=None,
+                  framing=None):
         # The rule engine follows the process frame: it discharges the
         # obligations the executed prefix left open, in the order the frame
         # imposes, and adds the activities the model enables now.  It has no

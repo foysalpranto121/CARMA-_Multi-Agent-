@@ -46,6 +46,10 @@ class RunConfiguration(models.Model):
     llm_model       = models.CharField(max_length=50, choices=MODEL_CHOICES, default='claude-opus-5-5')
     temperature     = models.FloatField(default=0.0)
     max_tokens      = models.PositiveIntegerField(default=4096)
+    reasoning_effort = models.CharField(
+        max_length=10, blank=True, default='',
+        choices=[('', 'provider default'), ('low', 'low'), ('medium', 'medium'), ('high', 'high')],
+        help_text='Reasoning effort of a reasoning model (gpt-oss); empty = provider default')
 
     # CAR retriever params (if use_car=True)
     top_k           = models.PositiveSmallIntegerField(default=10)

@@ -16,11 +16,10 @@ import json
 import os
 
 from django.core.management.base import BaseCommand, CommandError
-from django.utils import timezone
 
 from apps.benchmark.models import BenchmarkCase
-from apps.experiments.models import Adaptation, ExperimentRun, RunConfiguration
-from apps.experiments.tasks import aggregate_results, persist_outcome
+from apps.experiments.execution import TUNING_NOTE, RunInterrupted, execute, open_run
+from apps.experiments.models import Adaptation, RunConfiguration
 from carma_engine.llm.client import LLMUnavailable
 from carma_engine.runners import get_runner
 from carma_engine.runners.base import _end_activities
@@ -59,6 +58,8 @@ class Command(BaseCommand):
                             help='LLM to tune for: tau is calibrated on its confidences.')
         parser.add_argument('--seed', type=int, default=42)
         parser.add_argument('--output', default='../artifacts/tuning')
+        parser.add_argument('--resume', action='store_true',
+                            help='Continue the unfinished tuning run instead of starting anew.')
 
     def handle(self, *args, **options):
         configuration = RunConfiguration.objects.filter(
@@ -78,14 +79,15 @@ class Command(BaseCommand):
         except LLMUnavailable as exc:
             raise CommandError(str(exc)) from exc
 
-        run = ExperimentRun.objects.create(
-            configuration=configuration, seed=options['seed'], status='running',
-            started_at=timezone.now(), total_cases=len(cases),
-            error_log='tau tuning on the pilot split, confidence gate off (tau = 0)')
-        self.stdout.write(f'Running {configuration.code} on {len(cases)} pilot cases …')
-        for benchmark_case in cases:
-            persist_outcome(run, benchmark_case, runner.run(benchmark_case, configuration))
-        aggregate_results.apply(args=[[], str(run.id)])
+        run = open_run(configuration, options['seed'], cases, resume=options['resume'],
+                       note=f'{TUNING_NOTE}, confidence gate off (tau = 0)')
+        self.stdout.write(f'Running {configuration.code} on {len(cases)} pilot cases '
+                          f'(run {run.id}) …')
+        try:
+            execute([(run, runner, configuration)], cases, progress=self.stdout.write)
+        except RunInterrupted as exc:
+            raise CommandError(f'Paused, the outcomes so far are kept ({exc}). '
+                               'Run the same command with --resume to continue.') from exc
 
         rows = [(adaptation.benchmark_case, adaptation) for adaptation in
                 Adaptation.objects.filter(run=run).select_related(

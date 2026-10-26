@@ -141,7 +141,10 @@ class BenchmarkCase(models.Model):
 
     # The evaluation cases are the benchmark.  The pilot cases are used only
     # to tune the pre-registered hyper-parameters (τ) and are never evaluated.
-    SPLIT_CHOICES = [('eval', 'Evaluation'), ('pilot', 'Pilot (tuning only)')]
+    # ``seen``: an evaluation case a model was run on before the study was
+    # registered; it is never evaluated (see docs/OSF_PREREGISTRATION.md).
+    SPLIT_CHOICES = [('eval', 'Evaluation'), ('pilot', 'Pilot (tuning only)'),
+                     ('seen', 'Seen by a model before registration (never evaluated)')]
     split          = models.CharField(max_length=5, choices=SPLIT_CHOICES, default='eval')
     created_at     = models.DateTimeField(auto_now_add=True)
 

@@ -77,6 +77,8 @@ class RunOutcome:
     scv_token: str = ''
     violation_report: dict = field(default_factory=dict)
     error: str = ''
+    # the model could not be reached: an outage, not an outcome of the case
+    llm_unavailable: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -141,7 +143,8 @@ class BaseRunner:
             temperature = float(getattr(self.config, 'temperature', 0.0) or 0.0)
             max_tokens = int(getattr(self.config, 'max_tokens', 4096) or 4096)
             self._llm = build_llm(model=model, temperature=temperature,
-                                  max_tokens=max_tokens, seed=self.seed)
+                                  max_tokens=max_tokens, seed=self.seed,
+                                  reasoning_effort=getattr(self.config, 'reasoning_effort', '') or '')
         return self._llm
 
     def check_llm(self):
@@ -254,12 +257,15 @@ class BaseRunner:
         count = max(1, int(getattr(self.config, 'num_agents', 4) or 4))
         return list(AGENT_ROLES[:count])
 
-    def plan_case(self, benchmark_case, state, constraint_graph, evidence, feedback=None):
+    def plan_case(self, benchmark_case, state, constraint_graph, evidence, feedback=None,
+                  framing=None):
         """
         Produce the adaptation plan (overridden by the rule-based runner).
 
         :param feedback: the verifier's report on the previous plan, for an
                          SCV repair round
+        :param framing:  the coordinator's framing of the first round, which
+                         a repair round reuses instead of framing the case anew
         """
         from ..agents.graph import build_agent_graph  # noqa: PLC0415
 
@@ -288,9 +294,10 @@ class BaseRunner:
             'messages': [],
             'token_counts': {'input': 0, 'output': 0},
             'llm_calls': 0,
-            'agent_intents': [],
+            'agent_intents': list((framing or {}).get('agent_intents') or []),
             'result': {},
-            'extras': {},
+            'extras': ({'coordinator': framing['coordinator']}
+                       if (framing or {}).get('coordinator') is not None else {}),
         }
         try:
             final_state = graph.invoke(initial_state)
@@ -316,6 +323,8 @@ class BaseRunner:
             'escalation_reason': final_state.get('escalation_reason', ''),
             'llm_calls': int(final_state.get('llm_calls', 0) or 0),
             'agent_intents': final_state.get('agent_intents') or [],
+            'framing': {'agent_intents': final_state.get('agent_intents') or [],
+                        'coordinator': extras.get('coordinator')},
         }
 
     def verify(self, benchmark_case, plan, constraint_graph, state, agent_intents=None):
@@ -374,7 +383,8 @@ class BaseRunner:
                 while planned and not passed and scv_repairs < self.repair_rounds():
                     scv_repairs += 1
                     agent_result = self.plan_case(benchmark_case, state, constraint_graph,
-                                                  evidence, feedback=report)
+                                                  evidence, feedback=report,
+                                                  framing=agent_result.get('framing'))
                     planned = list(agent_result.get('activity_seq') or [])
                     if not planned:
                         passed, token, viol_cost, report = None, '', 0.0, {}
@@ -450,6 +460,7 @@ class BaseRunner:
         except LLMUnavailable as exc:
             outcome.status = 'failed'
             outcome.error = str(exc)
+            outcome.llm_unavailable = True
             log.warning('LLM unavailable for case %s: %s', getattr(benchmark_case, 'id', '?'), exc)
         except Exception as exc:
             outcome.status = 'failed'

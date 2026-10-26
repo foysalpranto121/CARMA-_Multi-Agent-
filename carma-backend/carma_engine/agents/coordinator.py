@@ -48,6 +48,10 @@ def coordinator_node(llm, agent_roles: list[str] | None = None):
     agent_roles = agent_roles or []
 
     def _run(state: dict) -> dict:
+        if (state.get('extras') or {}).get('coordinator') is not None:
+            # An SCV repair round of the same case: its perturbation, state
+            # and prefix are unchanged, so the first round's framing stands.
+            return state
         process_state = state.get('process_state') or {}
         roles_block = (
             'Specialist agents available: ' + ', '.join(agent_roles) + '.'

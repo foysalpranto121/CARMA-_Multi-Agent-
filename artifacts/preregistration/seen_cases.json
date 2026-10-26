@@ -1,0 +1,206 @@
+{
+  "created": "2026-10-26T06:12:06.934150+00:00",
+  "reason": "evaluation cases an LLM configuration was run on before registration (retired gpt-4o pilots); moved to split=seen, never evaluated",
+  "runs": [
+    {
+      "run_id": "052904da-7d26-4001-b83d-edfccfafad37",
+      "configuration": "B4",
+      "model": "gpt-4o"
+    },
+    {
+      "run_id": "763bb5c5-d778-44ff-9fb6-fecb7cefc566",
+      "configuration": "B7",
+      "model": "gpt-4o"
+    },
+    {
+      "run_id": "7b6527d5-d465-49d3-93a1-dd9449437b9c",
+      "configuration": "B4",
+      "model": "gpt-4o"
+    },
+    {
+      "run_id": "8eeada7a-5acd-4e1f-a5ef-4c112a48ef1b",
+      "configuration": "B7",
+      "model": "gpt-4o"
+    },
+    {
+      "run_id": "a98a6b97-99c0-47e1-9bb3-ccabf4b5c99f",
+      "configuration": "B7",
+      "model": "gpt-4o"
+    },
+    {
+      "run_id": "da5549b3-75d4-45c4-bb7d-b93fe2a61368",
+      "configuration": "B4",
+      "model": "gpt-4o"
+    }
+  ],
+  "cases": [
+    {
+      "id": "427bab37-63ba-4774-b835-9816f1faef36",
+      "scenario": "S1",
+      "process": "BPI Challenge 2020 — Travel Permit",
+      "case_id": "travel permit 70051"
+    },
+    {
+      "id": "3ddb76ec-e50b-479e-bc2e-8b002c655348",
+      "scenario": "S6",
+      "process": "BPI Challenge 2017 — Loan Application",
+      "case_id": "Application_211406000"
+    },
+    {
+      "id": "8c5c1bbd-b1cd-4dd1-874a-82a489ea07dd",
+      "scenario": "S3",
+      "process": "BPI Challenge 2020 — Travel Permit",
+      "case_id": "travel permit 70051"
+    },
+    {
+      "id": "f1b1803b-3a6e-4469-8502-65283b1e2be1",
+      "scenario": "S4",
+      "process": "BPI Challenge 2020 — Travel Permit",
+      "case_id": "travel permit 70051"
+    },
+    {
+      "id": "b9bc7bbb-6807-4691-b2c6-d38d676b617c",
+      "scenario": "S3",
+      "process": "BPI Challenge 2017 — Loan Application",
+      "case_id": "Application_211406000"
+    },
+    {
+      "id": "249d3d60-a74f-4c58-afae-d52b2bc8e2b3",
+      "scenario": "S2",
+      "process": "BPI Challenge 2017 — Loan Application",
+      "case_id": "Application_211406000"
+    },
+    {
+      "id": "fa738e02-4066-406b-b1a2-44bb963914d3",
+      "scenario": "S0",
+      "process": "BPI Challenge 2017 — Loan Application",
+      "case_id": "Application_211406000"
+    },
+    {
+      "id": "f6d3868f-ea70-4ea4-8a6e-b98782f00a1e",
+      "scenario": "S2",
+      "process": "Road Traffic Fine Management",
+      "case_id": "S158429"
+    },
+    {
+      "id": "36d73ec7-d7c7-4036-8f8e-6e856bb5ed52",
+      "scenario": "S1",
+      "process": "BPI Challenge 2017 — Loan Application",
+      "case_id": "Application_211406000"
+    },
+    {
+      "id": "65cdb759-0b4f-4775-928c-9b5ae618719e",
+      "scenario": "S5",
+      "process": "Road Traffic Fine Management",
+      "case_id": "S158429"
+    },
+    {
+      "id": "5e1e3dc6-1be8-428f-a8d0-15efdc68e542",
+      "scenario": "S6",
+      "process": "Road Traffic Fine Management",
+      "case_id": "S158429"
+    },
+    {
+      "id": "53afac68-87c9-49f6-875f-bdf96d1ef942",
+      "scenario": "S4",
+      "process": "BPI Challenge 2017 — Loan Application",
+      "case_id": "Application_211406000"
+    },
+    {
+      "id": "6b5c930a-751b-4d4b-a05d-1831bedfce08",
+      "scenario": "S2",
+      "process": "Helpdesk — IT Service Tickets",
+      "case_id": "Case 959"
+    },
+    {
+      "id": "a99b4e78-6334-4b2b-bbe1-465101ee5c9c",
+      "scenario": "S5",
+      "process": "BPI Challenge 2017 — Loan Application",
+      "case_id": "Application_211406000"
+    },
+    {
+      "id": "8626d93e-fd98-406a-acba-78b97f96cc4f",
+      "scenario": "S1",
+      "process": "Road Traffic Fine Management",
+      "case_id": "S158429"
+    },
+    {
+      "id": "ec08d8a9-5ed4-49e9-a2e7-3d49b098a329",
+      "scenario": "S4",
+      "process": "Helpdesk — IT Service Tickets",
+      "case_id": "Case 959"
+    },
+    {
+      "id": "399bad5d-1a3b-4d09-810f-6a6e9e93216e",
+      "scenario": "S0",
+      "process": "Road Traffic Fine Management",
+      "case_id": "S158429"
+    },
+    {
+      "id": "47197e9f-dc66-409a-a6d5-db6789435bb7",
+      "scenario": "S6",
+      "process": "BPI Challenge 2020 — Travel Permit",
+      "case_id": "travel permit 70051"
+    },
+    {
+      "id": "7c8240db-736f-4ca5-819a-1303b44ac2cf",
+      "scenario": "S3",
+      "process": "Road Traffic Fine Management",
+      "case_id": "S158429"
+    },
+    {
+      "id": "5487fe37-38b2-4912-b464-0acbbeef6bad",
+      "scenario": "S0",
+      "process": "BPI Challenge 2020 — Travel Permit",
+      "case_id": "travel permit 70051"
+    },
+    {
+      "id": "b3af85d4-7af9-4150-914c-5623151a0306",
+      "scenario": "S2",
+      "process": "BPI Challenge 2020 — Travel Permit",
+      "case_id": "travel permit 70051"
+    },
+    {
+      "id": "848edcaf-6780-474e-88f7-ab999ad07659",
+      "scenario": "S4",
+      "process": "Road Traffic Fine Management",
+      "case_id": "S158429"
+    },
+    {
+      "id": "32ff4660-2328-4f63-b5de-52d0d9632e3a",
+      "scenario": "S5",
+      "process": "BPI Challenge 2020 — Travel Permit",
+      "case_id": "travel permit 70051"
+    },
+    {
+      "id": "03987325-abc5-4c7b-b387-c0dc0570c47e",
+      "scenario": "S3",
+      "process": "Helpdesk — IT Service Tickets",
+      "case_id": "Case 959"
+    },
+    {
+      "id": "73a32278-eae5-4c5a-99e6-595e7554abda",
+      "scenario": "S6",
+      "process": "Helpdesk — IT Service Tickets",
+      "case_id": "Case 959"
+    },
+    {
+      "id": "1e85955b-7acb-44f0-9783-04bae4e17038",
+      "scenario": "S0",
+      "process": "Helpdesk — IT Service Tickets",
+      "case_id": "Case 959"
+    },
+    {
+      "id": "d50eccf9-603b-454c-b8b1-cfba2dcbca12",
+      "scenario": "S1",
+      "process": "Helpdesk — IT Service Tickets",
+      "case_id": "Case 959"
+    },
+    {
+      "id": "1d3d0dca-0f2c-4fe4-bac8-220d944c620c",
+      "scenario": "S5",
+      "process": "Helpdesk — IT Service Tickets",
+      "case_id": "Case 959"
+    }
+  ]
+}
