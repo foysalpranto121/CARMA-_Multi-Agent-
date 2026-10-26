@@ -730,13 +730,16 @@ def choose_cut(case, spec: LogSpec, process, ratio: float = 0.6,
 
 
 def build_benchmark(process, event_log, cases_per_scenario: int = 30,
-                    constraint_set=None, seed: int = 42, replace: bool = True):
+                    constraint_set=None, seed: int = 42, replace: bool = True,
+                    pilot_cases: int = 0):
     """
     Build the benchmark for one process.
 
     :param process:            the ``Process`` the benchmark belongs to
     :param event_log:          the ``EventLog`` to take the test cases from
-    :param cases_per_scenario: how many cases to build per scenario code
+    :param cases_per_scenario: how many evaluation cases to build per scenario code
+    :param pilot_cases:        how many further cases per scenario code form
+                               the pilot split (tuning only)
     :param constraint_set:     the ``ConstraintSet`` attached to the cases
     :param seed:               seed of the deterministic case selection
     :param replace:            delete the previous benchmark of the process
@@ -788,15 +791,25 @@ def build_benchmark(process, event_log, cases_per_scenario: int = 30,
 
     # The cut of a case does not depend on the scenario, so it is chosen
     # once and shared by the seven scenarios of the case.
-    selected, cuts, skipped = _select_compliant_cases(
+    selected, cuts, skipped, pilot_ids = _select_compliant_cases(
         test_cases, cases_per_scenario, seed, spec, process, constraint_set,
-        roles_by_activity)
+        roles_by_activity, pilot=pilot_cases)
     log.info('Chose %d cases whose observed continuation complies with the '
-             'frame (%d skipped).', len(selected), skipped)
+             'frame (%d skipped, %d of them for the pilot split).',
+             len(selected), skipped, len(pilot_ids))
+
+    # The position of a case within its own split, so that adding pilot
+    # cases leaves the per-case parameters of the evaluation cases as they are.
+    positions, counters = {}, {'eval': 0, 'pilot': 0}
+    for case in selected:
+        split = 'pilot' if case.case_id in pilot_ids else 'eval'
+        positions[case.case_id] = (split, counters[split])
+        counters[split] += 1
 
     created = 0
     for code, scenario in scenarios.items():
-        for index, case in enumerate(selected):
+        for case in selected:
+            split, index = positions[case.case_id]
             prefix, continuation_events = cuts[case.case_id]
             continuation = _activities_of(continuation_events)
             alternative, alternative_count = alternative_continuation(
@@ -835,6 +848,7 @@ def build_benchmark(process, event_log, cases_per_scenario: int = 30,
                     'gold_viol_cost':    gold_cost,
                     'gold_exec_cost':    0.1 * len(perturbation.activity_seq),
                     'is_validated':      False,
+                    'split':             split,
                 },
             )
             report = validate_case(benchmark_case, process)
@@ -848,7 +862,8 @@ def build_benchmark(process, event_log, cases_per_scenario: int = 30,
         'process_id':         str(process.id),
         'event_log':          event_log.name,
         'scenarios':          len(scenarios),
-        'cases_per_scenario': len(selected),
+        'cases_per_scenario': counters['eval'],
+        'pilot_per_scenario': counters['pilot'],
         'benchmark_cases':    created,
     }
 
@@ -943,7 +958,7 @@ def _select_cases(cases: list, count: int, seed: int) -> list:
 
 
 def _select_compliant_cases(cases: list, count: int, seed: int, spec, process,
-                            constraint_set, roles_by_activity) -> tuple:
+                            constraint_set, roles_by_activity, pilot: int = 0) -> tuple:
     """
     ``count`` cases, in the seeded order of :func:`_select_cases`, whose
     observed continuation complies with the process frame.
@@ -954,8 +969,13 @@ def _select_compliant_cases(cases: list, count: int, seed: int, spec, process,
     reached by any agent, so such a case is skipped and the next one in the
     seeded order is taken.
 
-    :returns: ``(cases, cuts, skipped)`` — the cases in temporal order, the
-              cut of each case and how many candidates were skipped
+    The ``pilot`` cases are the ones picked after the first ``count``: a
+    random draw like the others, which leaves the evaluation cases exactly
+    those a selection without a pilot split would take.
+
+    :returns: ``(cases, cuts, skipped, pilot_ids)`` — the cases in temporal
+              order, the cut of each case, how many candidates were skipped
+              and the case ids of the pilot cases
     """
     rng = random.Random(seed)
     order = list(range(len(cases)))
@@ -963,7 +983,7 @@ def _select_compliant_cases(cases: list, count: int, seed: int, spec, process,
 
     chosen, cuts, skipped = [], {}, 0
     for index in order:
-        if len(chosen) >= count:
+        if len(chosen) >= count + pilot:
             break
         case = cases[index]
         prefix, continuation_events = choose_cut(case, spec, process)
@@ -975,8 +995,9 @@ def _select_compliant_cases(cases: list, count: int, seed: int, spec, process,
             continue
         chosen.append(index)
         cuts[case.case_id] = (prefix, continuation_events)
+    pilot_ids = {cases[index].case_id for index in chosen[count:]}
     chosen.sort()
-    return [cases[index] for index in chosen], cuts, skipped
+    return [cases[index] for index in chosen], cuts, skipped, pilot_ids
 
 
 def _template_for(code: str) -> dict:

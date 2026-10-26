@@ -64,7 +64,9 @@ class Command(BaseCommand):
 
         rows = []
         for run in runs:
-            adaptations = Adaptation.objects.filter(run=run).select_related('benchmark_case')
+            # The pilot split is for tuning only.
+            adaptations = Adaptation.objects.filter(
+                run=run, benchmark_case__split='eval').select_related('benchmark_case')
             # A run on the test double measures the plumbing, never a model.
             if not options['include_mock']:
                 adaptations = adaptations.exclude(llm_backend='mock')

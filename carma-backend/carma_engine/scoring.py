@@ -12,8 +12,14 @@ no autonomous continuation is compliant and the case belongs to a human
 (``escalate_for_approval``, ``request_clarification``, ``escalate_conflict``).
 Under those the goal is reached when the system withholds the action: it
 escalated the case, or the agent declined to act.  Under every other strategy
-the goal is the end of the reference continuation, so it is reached when the
-executed continuation ends where the reference ends.
+the goal is the end of the case: the executed continuation ends with one of
+the process's end activities (the activities its training traces end with)
+or with the activity the reference ends with.  Which of the valid outcomes the
+case reaches — a loan accepted or cancelled — is not part of the goal; how
+close the adaptation is to the recorded one is adaptation correctness, which
+is scored separately.  What a scenario demands of the path (the alternative
+to a blocked step, the renamed activity, the rule version in force) is part
+of the frame, so breaking it is a hard violation and not a success.
 
 The scorer only reads the reference; it never sees which configuration
 produced the adaptation, so every configuration is scored by the same rule.
@@ -65,7 +71,8 @@ def sequence_similarity(a: list, b: list) -> float:
 
 
 def score_adaptation(gold_adaptation: dict, gold_sequence: list, executed: list,
-                     status: str, hard_violation: bool) -> Score:
+                     status: str, hard_violation: bool,
+                     end_activities: list | None = None) -> Score:
     """
     Score one adaptation.
 
@@ -74,6 +81,7 @@ def score_adaptation(gold_adaptation: dict, gold_sequence: list, executed: list,
     :param executed:        the activities the system actually executed
     :param status:          the outcome status of the adaptation
     :param hard_violation:  whether the executed trace violates a hard constraint
+    :param end_activities:  the activities the process's cases end with
     """
     strategy = (gold_adaptation or {}).get('strategy', '')
     executed = list(executed or [])
@@ -84,8 +92,9 @@ def score_adaptation(gold_adaptation: dict, gold_sequence: list, executed: list,
         similarity = 1.0 if reached else 0.0
         exact = reached
     else:
-        if gold_sequence:
-            reached = bool(executed) and executed[-1] == gold_sequence[-1]
+        ends = set(end_activities or []) | ({gold_sequence[-1]} if gold_sequence else set())
+        if ends:
+            reached = bool(executed) and executed[-1] in ends
         else:
             reached = not executed
         similarity = sequence_similarity(executed, gold_sequence)

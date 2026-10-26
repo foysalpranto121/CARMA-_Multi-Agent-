@@ -63,6 +63,11 @@ class Command(BaseCommand):
             help='Rebuild the benchmark from the cases already in the database.',
         )
         parser.add_argument(
+            '--pilot-cases', type=int, default=3,
+            help='Further cases per scenario and dataset for the pilot split, which '
+                 'is used only to tune tau (default 3, about 10%%).',
+        )
+        parser.add_argument(
             '--benchmark-only', action='store_true',
             help='Only select the benchmark cases again, on the model, constraints '
                  'and corpus already in the database (keeps their ids and the index).',
@@ -109,10 +114,12 @@ class Command(BaseCommand):
             cases_per_scenario=options['cases_per_scenario'],
             constraint_set=constraint_set,
             seed=options['seed'],
+            pilot_cases=options['pilot_cases'],
         )
         self.stdout.write(
             f"  {result['benchmark_cases']} benchmark cases "
-            f"({result['cases_per_scenario']} per scenario)"
+            f"({result['cases_per_scenario']} per scenario + "
+            f"{result['pilot_per_scenario']} pilot)"
         )
         return {
             'dataset':         dataset,
@@ -221,10 +228,12 @@ class Command(BaseCommand):
             cases_per_scenario=options['cases_per_scenario'],
             constraint_set=constraint_set,
             seed=options['seed'],
+            pilot_cases=options['pilot_cases'],
         )
         self.stdout.write(
             f"  {result['benchmark_cases']} benchmark cases "
-            f"({result['cases_per_scenario']} per scenario)"
+            f"({result['cases_per_scenario']} per scenario + "
+            f"{result['pilot_per_scenario']} pilot)"
         )
 
         return {

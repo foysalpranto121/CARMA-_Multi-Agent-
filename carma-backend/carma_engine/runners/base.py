@@ -440,7 +440,8 @@ class BaseRunner:
                 outcome.viol_cost, constraint_graph)
             score = score_adaptation(
                 benchmark_case.gold_adaptation, benchmark_case.gold_activity_seq,
-                outcome.activity_seq, outcome.status, outcome.hard_violation)
+                outcome.activity_seq, outcome.status, outcome.hard_violation,
+                end_activities=_end_activities(benchmark_case.process))
             outcome.goal_reached = score.goal_reached
             outcome.task_success = score.task_success
             outcome.gold_exact_match = score.exact_match

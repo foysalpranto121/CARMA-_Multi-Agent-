@@ -51,7 +51,7 @@ def run_experiment(self, run_id: str):
     run.started_at = timezone.now()
 
     cases = BenchmarkCase.objects.filter(
-        process=run.process, is_validated=True
+        process=run.process, is_validated=True, split='eval'
     ).select_related('case', 'scenario', 'constraint_set')
 
     run.total_cases = cases.count()

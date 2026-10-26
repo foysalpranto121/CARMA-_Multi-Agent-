@@ -138,6 +138,11 @@ class BenchmarkCase(models.Model):
     )
 
     is_validated   = models.BooleanField(default=False)
+
+    # The evaluation cases are the benchmark.  The pilot cases are used only
+    # to tune the pre-registered hyper-parameters (τ) and are never evaluated.
+    SPLIT_CHOICES = [('eval', 'Evaluation'), ('pilot', 'Pilot (tuning only)')]
+    split          = models.CharField(max_length=5, choices=SPLIT_CHOICES, default='eval')
     created_at     = models.DateTimeField(auto_now_add=True)
 
     class Meta:

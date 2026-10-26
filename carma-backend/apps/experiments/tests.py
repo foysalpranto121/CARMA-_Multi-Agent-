@@ -388,6 +388,17 @@ class TestScoring:
         assert score.partial_match is True
         assert score.similarity == 0.8
 
+    def test_any_end_of_the_process_reaches_the_goal(self):
+        """A loan cancelled instead of accepted still ends the case."""
+        from carma_engine.scoring import score_adaptation
+
+        score = score_adaptation({'strategy': 'follow_observed_path'},
+                                 ['check', 'accept'], ['check', 'cancel'], 'success', False,
+                                 end_activities=['accept', 'cancel'])
+        assert score.task_success is True
+        assert score.exact_match is False
+        assert score.similarity == 0.5
+
     def test_hard_violation_is_not_a_success(self):
         from carma_engine.scoring import score_adaptation
 

@@ -51,6 +51,8 @@ class Command(BaseCommand):
                             help='Process id or name to run, or "all".')
         parser.add_argument('--limit', type=int, default=0,
                             help='Only run the first N benchmark cases (0 = all).')
+        parser.add_argument('--split', choices=['eval', 'pilot'], default='eval',
+                            help='Benchmark split: eval (the study) or pilot (tuning only).')
         parser.add_argument('--per-scenario', type=int, default=0,
                             help='Only run N cases of each scenario S0-S6, taken in '
                                  'turn from each process (0 = all).')
@@ -102,7 +104,8 @@ class Command(BaseCommand):
         return configuration
 
     def _cases(self, options) -> list:
-        queryset = BenchmarkCase.objects.filter(is_validated=True).select_related(
+        queryset = BenchmarkCase.objects.filter(
+            is_validated=True, split=options.get('split') or 'eval').select_related(
             'case', 'scenario', 'process', 'constraint_set')
         selector = options['process']
         if selector and selector.lower() != 'all':
