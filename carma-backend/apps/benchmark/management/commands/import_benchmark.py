@@ -62,6 +62,11 @@ class Command(BaseCommand):
             '--skip-import', action='store_true',
             help='Rebuild the benchmark from the cases already in the database.',
         )
+        parser.add_argument(
+            '--benchmark-only', action='store_true',
+            help='Only select the benchmark cases again, on the model, constraints '
+                 'and corpus already in the database (keeps their ids and the index).',
+        )
 
     def handle(self, *args, **options):
         datasets = options['datasets']
@@ -89,9 +94,43 @@ class Command(BaseCommand):
         total = sum(entry['benchmark_cases'] for entry in summary)
         self.stdout.write(self.style.SUCCESS(f'  total benchmark cases: {total}'))
 
+    def _rebuild_benchmark(self, dataset, spec, options):
+        """Select the benchmark cases again on the frame already stored."""
+        from apps.processes.models import CorpusDocument
+
+        started = time.time()
+        event_log = EventLog.objects.get(name=dataset)
+        process = Process.objects.get(name=spec.display_name)
+        constraint_set = (process.constraint_sets.filter(name=f'{dataset} v1.0').first()
+                          or process.constraint_sets.filter(is_active=True).first())
+        self.stdout.write(f'\n=== {dataset}: selecting the benchmark cases again ===')
+        result = build_benchmark(
+            process, event_log,
+            cases_per_scenario=options['cases_per_scenario'],
+            constraint_set=constraint_set,
+            seed=options['seed'],
+        )
+        self.stdout.write(
+            f"  {result['benchmark_cases']} benchmark cases "
+            f"({result['cases_per_scenario']} per scenario)"
+        )
+        return {
+            'dataset':         dataset,
+            'cases':           Case.objects.filter(event_log=event_log).count(),
+            'train':           '-',
+            'test':            '-',
+            'benchmark_cases': result['benchmark_cases'],
+            'activities':      len(process.activities or []),
+            'constraints':     constraint_set.constraints.count() if constraint_set else 0,
+            'corpus':          CorpusDocument.objects.filter(process=process).count(),
+            'seconds':         round(time.time() - started, 1),
+        }
+
     def _handle_dataset(self, dataset, options):
         started = time.time()
         spec = SUPPORTED_LOGS[dataset]
+        if options['benchmark_only']:
+            return self._rebuild_benchmark(dataset, spec, options)
 
         if not options['skip_import']:
             self.stdout.write(f'\n=== {dataset}: importing {spec.filename} ===')

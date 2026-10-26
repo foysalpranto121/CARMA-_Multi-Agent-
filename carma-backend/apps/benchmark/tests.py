@@ -32,6 +32,32 @@ class TestCohenKappa:
         assert 'error' in cohen_kappa([], [])
 
 
+class TestReferenceValidation:
+    """A reference that breaks the frame is only kept where that is the right answer."""
+
+    @staticmethod
+    def _report(strategy, cost):
+        from types import SimpleNamespace
+
+        from apps.benchmark.services.scenario_builder import validate_case
+
+        trace = [{'activity': 'a'}, {'activity': 'b'}, {'activity': 'c'}]
+        benchmark_case = SimpleNamespace(
+            case=SimpleNamespace(prefix_trace=trace), prefix_trace=trace[:1],
+            gold_activity_seq=['b', 'c'], perturbation={}, perturbation_text='nominal',
+            gold_adaptation={'strategy': strategy}, gold_viol_cost=cost)
+        return validate_case(benchmark_case, SimpleNamespace(activities=['a', 'b', 'c']))
+
+    def test_a_violating_observed_path_is_not_validated(self):
+        assert self._report('follow_observed_path', 2.0)['validated'] is False
+
+    def test_a_minimum_cost_exception_path_stays(self):
+        assert self._report('take_observed_alternative_path', 2.0)['validated'] is True
+
+    def test_a_compliant_reference_passes(self):
+        assert self._report('follow_observed_path', 0.0)['validated'] is True
+
+
 def _annotator(name):
     return User.objects.create_user(
         email=f'{name}@carma.test', password='Carma-Test-2026!',

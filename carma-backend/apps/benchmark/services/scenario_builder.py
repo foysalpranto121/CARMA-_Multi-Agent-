@@ -585,6 +585,14 @@ def gold_violation_cost(case, process, constraint_set, prefix: list,
         return 0.0
 
 
+#: Gold strategies whose reference may break the frame by design: the
+#: exception left no compliant way out, so the minimum-cost path is right.
+MINIMUM_COST_STRATEGIES = frozenset({
+    'take_observed_alternative_path',
+    'request_missing_document',
+})
+
+
 def validate_case(benchmark_case, process) -> dict:
     """
     Check that the reference behaviour of a case really belongs to it.
@@ -634,6 +642,14 @@ def validate_case(benchmark_case, process) -> dict:
 
     _check('reference_is_scorable',
            isinstance(benchmark_case.gold_viol_cost, (int, float)),
+           f'violation cost {benchmark_case.gold_viol_cost}')
+
+    # The reference has to be reachable: it may only break the frame where
+    # the scenario makes the cheapest non-compliant path the right answer
+    # (an exception without a compliant way out).
+    _check('reference_complies_with_the_frame',
+           strategy in MINIMUM_COST_STRATEGIES
+           or not (benchmark_case.gold_viol_cost or 0) > 0,
            f'violation cost {benchmark_case.gold_viol_cost}')
 
     passed = all(check['ok'] for check in checks)
@@ -731,7 +747,12 @@ def build_benchmark(process, event_log, cases_per_scenario: int = 30,
     spec = _spec_for(event_log)
 
     if replace:
-        BenchmarkCase.objects.filter(process=process).delete()
+        # A case an experiment already ran on is retired, not deleted, so
+        # the adaptations recorded on it survive; it simply stops being
+        # part of the benchmark unless it is selected again.
+        previous = BenchmarkCase.objects.filter(process=process)
+        previous.filter(adaptations__isnull=True).delete()
+        previous.update(is_validated=False)
 
     scenarios = {}
     for code, meta in SCENARIOS.items():
@@ -765,14 +786,13 @@ def build_benchmark(process, event_log, cases_per_scenario: int = 30,
     amount_limit = _amount_limit(constraint_set)
     existence_activities = _existence_activities(constraint_set)
 
-    selected = _select_cases(test_cases, cases_per_scenario, seed)
-
     # The cut of a case does not depend on the scenario, so it is chosen
     # once and shared by the seven scenarios of the case.
-    cuts: dict[str, tuple] = {}
-    for case in selected:
-        cuts[case.case_id] = choose_cut(case, spec, process)
-    log.info('Chose the executed prefix of %d cases.', len(cuts))
+    selected, cuts, skipped = _select_compliant_cases(
+        test_cases, cases_per_scenario, seed, spec, process, constraint_set,
+        roles_by_activity)
+    log.info('Chose %d cases whose observed continuation complies with the '
+             'frame (%d skipped).', len(selected), skipped)
 
     created = 0
     for code, scenario in scenarios.items():
@@ -920,6 +940,43 @@ def _select_cases(cases: list, count: int, seed: int) -> list:
     rng.shuffle(indices)
     chosen = sorted(indices[:count])
     return [cases[i] for i in chosen]
+
+
+def _select_compliant_cases(cases: list, count: int, seed: int, spec, process,
+                            constraint_set, roles_by_activity) -> tuple:
+    """
+    ``count`` cases, in the seeded order of :func:`_select_cases`, whose
+    observed continuation complies with the process frame.
+
+    The observed continuation is the reference of every scenario that keeps
+    the observed path (S0, S3, S5 by authority, S6, S2 when the new rule is
+    not yet in force).  A reference that breaks the frame could not be
+    reached by any agent, so such a case is skipped and the next one in the
+    seeded order is taken.
+
+    :returns: ``(cases, cuts, skipped)`` — the cases in temporal order, the
+              cut of each case and how many candidates were skipped
+    """
+    rng = random.Random(seed)
+    order = list(range(len(cases)))
+    rng.shuffle(order)
+
+    chosen, cuts, skipped = [], {}, 0
+    for index in order:
+        if len(chosen) >= count:
+            break
+        case = cases[index]
+        prefix, continuation_events = choose_cut(case, spec, process)
+        continuation = _activities_of(continuation_events)
+        if not continuation or gold_violation_cost(
+                case, process, constraint_set, prefix, continuation,
+                roles_by_activity) > 0:
+            skipped += 1
+            continue
+        chosen.append(index)
+        cuts[case.case_id] = (prefix, continuation_events)
+    chosen.sort()
+    return [cases[index] for index in chosen], cuts, skipped
 
 
 def _template_for(code: str) -> dict:
